@@ -10,6 +10,9 @@ UIInterfaceOrientation LCOrientationLock = UIInterfaceOrientationUnknown;
 NSMutableArray<NSString*>* LCSupportedUrlSchemes = nil;
 BOOL launchURLProcessed = NO;
 
+// URL-scheme helper implemented later in this file.
+BOOL canAppOpenItself(NSURL* url);
+
 
 #pragma mark - Siri media bridge while a guest app owns the LiveContainer process
 
@@ -97,7 +100,7 @@ static id LCGuestApplicationHandlerForIntent(id self, SEL _cmd, UIApplication *a
 }
 
 static void LCInstallGuestIntentHandlerIfNeeded(id<UIApplicationDelegate> delegate) {
-    if(!delegate || LCHookedGuestDelegateClass == object_getClass(delegate)) {
+    if(!delegate || LCHookedGuestDelegateClass == [delegate class]) {
         return;
     }
 
@@ -106,7 +109,7 @@ static void LCInstallGuestIntentHandlerIfNeeded(id<UIApplicationDelegate> delega
         return;
     }
 
-    Class cls = object_getClass(delegate);
+    Class cls = [delegate class];
     SEL selector = @selector(application:handlerForIntent:);
     Method visibleMethod = class_getInstanceMethod(cls, selector);
     LCOriginalGuestIntentHandlerIMP = visibleMethod ? method_getImplementation(visibleMethod) : NULL;
