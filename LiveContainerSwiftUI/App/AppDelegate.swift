@@ -715,8 +715,8 @@ struct LCUniversalMediaShortcuts: AppShortcutsProvider {
         AppShortcut(
             intent: LCPlaySpotifyIntent(),
             phrases: [
-                "Play \(.$query) on Spotify with \(.applicationName)",
-                "\(.applicationName) play \(.$query) on Spotify"
+                "Play \(\.$query) on Spotify with \(.applicationName)",
+                "\(.applicationName) play \(\.$query) on Spotify"
             ],
             shortTitle: "Spotify",
             systemImageName: "music.note"
@@ -733,8 +733,8 @@ struct LCUniversalMediaShortcuts: AppShortcutsProvider {
         AppShortcut(
             intent: LCPlayYouTubeIntent(),
             phrases: [
-                "Play \(.$query) on YouTube with \(.applicationName)",
-                "\(.applicationName) play \(.$query) on YouTube"
+                "Play \(\.$query) on YouTube with \(.applicationName)",
+                "\(.applicationName) play \(\.$query) on YouTube"
             ],
             shortTitle: "YouTube",
             systemImageName: "play.rectangle"
@@ -751,8 +751,8 @@ struct LCUniversalMediaShortcuts: AppShortcutsProvider {
         AppShortcut(
             intent: LCPlayYouTubeMusicIntent(),
             phrases: [
-                "Play \(.$query) on YouTube Music with \(.applicationName)",
-                "\(.applicationName) play \(.$query) on YouTube Music"
+                "Play \(\.$query) on YouTube Music with \(.applicationName)",
+                "\(.applicationName) play \(\.$query) on YouTube Music"
             ],
             shortTitle: "YouTube Music",
             systemImageName: "music.note"
@@ -769,8 +769,8 @@ struct LCUniversalMediaShortcuts: AppShortcutsProvider {
         AppShortcut(
             intent: LCPlayDeezerIntent(),
             phrases: [
-                "Play \(.$query) on Deezer with \(.applicationName)",
-                "\(.applicationName) play \(.$query) on Deezer"
+                "Play \(\.$query) on Deezer with \(.applicationName)",
+                "\(.applicationName) play \(\.$query) on Deezer"
             ],
             shortTitle: "Deezer",
             systemImageName: "waveform"
