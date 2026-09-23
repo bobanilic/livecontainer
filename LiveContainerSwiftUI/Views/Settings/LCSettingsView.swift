@@ -261,6 +261,16 @@ struct LCSettingsView: View {
                 }
 
                 Section {
+                    NavigationLink {
+                        LCSiriDiagnosticsView()
+                    } label: {
+                        Text("Siri Media Diagnostics")
+                    }
+                } footer: {
+                    Text("Shows the last 250 Siri/Spotify routing events. Tokens are never stored.")
+                }
+
+                Section {
                     Button {
                         clearNotifications()
                     } label: {
@@ -712,5 +722,49 @@ struct LCSettingsView: View {
                 
             }
         }
+    }
+}
+
+
+struct LCSiriDiagnosticsView: View {
+    @State private var logText = ""
+
+    var body: some View {
+        VStack(spacing: 12) {
+            ScrollView {
+                Text(logText.isEmpty ? "No Siri diagnostics recorded yet." : logText)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding()
+            }
+
+            HStack {
+                Button("Refresh") {
+                    refresh()
+                }
+                Spacer()
+                Button("Copy") {
+                    UIPasteboard.general.string = logText
+                }
+                Spacer()
+                Button("Clear", role: .destructive) {
+                    LCUtils.appGroupUserDefault.removeObject(forKey: "LCSiriDiagnosticLog")
+                    refresh()
+                }
+            }
+            .padding(.horizontal)
+            .padding(.bottom)
+        }
+        .navigationTitle("Siri Diagnostics")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            refresh()
+        }
+    }
+
+    private func refresh() {
+        logText = (LCUtils.appGroupUserDefault.stringArray(forKey: "LCSiriDiagnosticLog") ?? [])
+            .joined(separator: "\n")
     }
 }
