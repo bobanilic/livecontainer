@@ -16,6 +16,41 @@ BOOL canAppOpenItself(NSURL* url);
 
 #pragma mark - Siri media bridge while a guest app owns the LiveContainer process
 
+static BOOL LCDeliverURLDirectlyToActiveGuest(NSURL *url) {
+    if(!url) return NO;
+
+    UIApplication *application = UIApplication.sharedApplication;
+    id<UIApplicationDelegate> delegate = application.delegate;
+
+    // When a LiveContainer guest owns the process and is backgrounded, asking
+    // UIApplication to open its own URL scheme may be rejected because it is a
+    // background-to-foreground launch. Deliver the URL directly to the guest's
+    // existing delegate instead so Spotify can process the deep link in-process.
+    SEL modernSelector = @selector(application:openURL:options:);
+    if(delegate && [delegate respondsToSelector:modernSelector]) {
+        BOOL (*invoke)(id, SEL, UIApplication *, NSURL *, NSDictionary *) =
+            (void *)objc_msgSend;
+        BOOL handled = invoke(delegate, modernSelector, application, url, @{});
+        NSLog(@"[LCSiri] Direct AppDelegate URL delivery handled=%d url=%@", handled, url);
+        if(handled) return YES;
+    }
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    SEL legacySelector = @selector(application:handleOpenURL:);
+    if(delegate && [delegate respondsToSelector:legacySelector]) {
+        BOOL (*invokeLegacy)(id, SEL, UIApplication *, NSURL *) =
+            (void *)objc_msgSend;
+        BOOL handled = invokeLegacy(delegate, legacySelector, application, url);
+        NSLog(@"[LCSiri] Legacy AppDelegate URL delivery handled=%d url=%@", handled, url);
+        if(handled) return YES;
+    }
+#pragma clang diagnostic pop
+
+    return NO;
+}
+
+
 @interface LCSiriGuestMediaIntentHandler : NSObject <INPlayMediaIntentHandling>
 + (instancetype)sharedHandler;
 @end
@@ -72,11 +107,16 @@ BOOL canAppOpenItself(NSURL* url);
 
     dispatch_async(dispatch_get_main_queue(), ^{
         NSURL *url = [NSURL URLWithString:uri];
-        if(url) {
-            [UIApplication.sharedApplication openURL:url options:@{} completionHandler:^(BOOL success) {
-                NSLog(@"[LCSiri] Guest bridge openURL success=%d", success);
-            }];
+        if(!url) return;
+
+        if(LCDeliverURLDirectlyToActiveGuest(url)) {
+            return;
         }
+
+        // Fallback for guests that don't expose a standard AppDelegate URL handler.
+        [UIApplication.sharedApplication openURL:url options:@{} completionHandler:^(BOOL success) {
+            NSLog(@"[LCSiri] Guest bridge system openURL fallback success=%d", success);
+        }];
     });
 }
 
