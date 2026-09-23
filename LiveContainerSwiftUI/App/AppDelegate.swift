@@ -157,12 +157,31 @@ final class SiriMediaIntentHandler: NSObject, INPlayMediaIntentHandling {
             return
         }
 
-        let deepLink = Self.spotifyDeepLink(for: intent)
-        NSLog("[LCSiri] Routing PlayMedia intent to %@ with URL %@", spotify.displayName, deepLink)
+        let hasSpecificRequest = Self.hasSpecificMediaRequest(intent)
+        let deepLink = hasSpecificRequest ? nil : "spotify:internal:collection:tracks"
+
+        if hasSpecificRequest {
+            do {
+                let archivedIntent = try NSKeyedArchiver.archivedData(
+                    withRootObject: intent,
+                    requiringSecureCoding: true
+                )
+                LCUtils.appGroupUserDefault.set(archivedIntent, forKey: "LCSiriPendingPlayMediaIntent")
+                LCUtils.appGroupUserDefault.set(Date(), forKey: "LCSiriPendingPlayMediaDate")
+                NSLog("[LCSiri] Stored specific PlayMedia intent for Spotify native handler")
+            } catch {
+                NSLog("[LCSiri] Failed to archive PlayMedia intent: %@", String(describing: error))
+            }
+        }
+
+        NSLog(
+            "[LCSiri] Routing PlayMedia intent to %@ specific=%d url=%@",
+            spotify.displayName,
+            hasSpecificRequest,
+            deepLink ?? "(native Spotify intent)"
+        )
 
         // Report acceptance before switching the host process into the guest.
-        // LiveContainer's normal non-multitask launch path restarts/kills the host,
-        // so waiting for runApp() to return could prevent Siri from receiving a response.
         completion(INPlayMediaIntentResponse(code: .success, userActivity: nil))
 
         Task { @MainActor in
@@ -183,54 +202,24 @@ final class SiriMediaIntentHandler: NSObject, INPlayMediaIntentHandling {
         }
     }
 
-    private static func spotifyDeepLink(for intent: INPlayMediaIntent) -> String {
-        guard let search = intent.mediaSearch else {
-            return "spotify:internal:collection:tracks"
-        }
+    private static func hasSpecificMediaRequest(_ intent: INPlayMediaIntent) -> Bool {
+        guard let search = intent.mediaSearch else { return false }
 
-        // Siri puts requests such as “play some jazz music” in genreNames rather
-        // than mediaName. A normal spotify:search: URI only opens search results;
-        // Spotify's genre-radio URI is a better playback context for genre requests.
-        if let genre = search.genreNames?.first(where: {
-            !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        }) {
-            let slug = spotifyGenreSlug(genre)
-            NSLog("[LCSiri] Genre request %@ -> spotify:radio:genre:%@", genre, slug)
-            return "spotify:radio:genre:\(slug)"
-        }
-
-        var descriptiveTerms: [String] = [
+        let scalarTerms = [
             search.mediaName,
             search.artistName,
             search.albumName
-        ].compactMap { value in
-            guard let value, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                return nil
-            }
-            return value
-        }
-        descriptiveTerms.append(contentsOf: search.moodNames ?? [])
-        descriptiveTerms.append(contentsOf: search.activityNames ?? [])
+        ]
 
-        if !descriptiveTerms.isEmpty {
-            let query = descriptiveTerms.joined(separator: " ")
-            let allowed = CharacterSet.urlQueryAllowed.subtracting(CharacterSet(charactersIn: "&?=#"))
-            let encoded = query.addingPercentEncoding(withAllowedCharacters: allowed) ?? query
-            return "spotify:search:\(encoded)"
+        if scalarTerms.contains(where: {
+            guard let value = $0 else { return false }
+            return !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }) {
+            return true
         }
 
-        // Generic requests such as “play some music” use the user's Liked Songs.
-        return "spotify:internal:collection:tracks"
-    }
-
-    private static func spotifyGenreSlug(_ genre: String) -> String {
-        let trimmed = genre.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let collapsed = trimmed.replacingOccurrences(
-            of: #"\s+"#,
-            with: "-",
-            options: .regularExpression
-        )
-        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
-        return collapsed.addingPercentEncoding(withAllowedCharacters: allowed) ?? collapsed
-    }
-}
+        if !(search.genreNames ?? []).isEmpty { return true }
+        if !(search.moodNames ?? []).isEmpty { return true }
+        if !(search.activityNames ?? []).isEmpty { return true }
+        return false
+    }}
