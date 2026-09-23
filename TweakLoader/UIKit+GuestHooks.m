@@ -279,10 +279,6 @@ static BOOL LCDeliverURLDirectlyToActiveGuest(NSURL *url) {
     UIApplication *application = UIApplication.sharedApplication;
     id<UIApplicationDelegate> delegate = application.delegate;
 
-    // When a LiveContainer guest owns the process and is backgrounded, asking
-    // UIApplication to open its own URL scheme may be rejected because it is a
-    // background-to-foreground launch. Deliver the URL directly to the guest's
-    // existing delegate instead so Spotify can process the deep link in-process.
     SEL modernSelector = @selector(application:openURL:options:);
     if(delegate && [delegate respondsToSelector:modernSelector]) {
         BOOL (*invoke)(id, SEL, UIApplication *, NSURL *, NSDictionary *) =
@@ -307,22 +303,96 @@ static BOOL LCDeliverURLDirectlyToActiveGuest(NSURL *url) {
     return NO;
 }
 
+static BOOL LCHasSpecificMediaRequest(INPlayMediaIntent *intent) {
+    INMediaSearch *search = intent.mediaSearch;
+    if(!search) return NO;
 
-static NSString *LCSpotifyGenreSlug(NSString *genre) {
-    NSString *trimmed = [[genre stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] lowercaseString];
-    NSArray<NSString *> *parts = [trimmed componentsSeparatedByCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-    NSMutableArray<NSString *> *nonEmpty = [NSMutableArray new];
-    for(NSString *part in parts) {
-        if(part.length) [nonEmpty addObject:part];
+    if(search.mediaName.length || search.artistName.length || search.albumName.length) {
+        return YES;
     }
-    NSString *collapsed = [nonEmpty componentsJoinedByString:@"-"];
-    NSMutableCharacterSet *allowed = [NSCharacterSet.alphanumericCharacterSet mutableCopy];
-    [allowed addCharactersInString:@"-_"];
-    return [collapsed stringByAddingPercentEncodingWithAllowedCharacters:allowed] ?: collapsed;
+    if(search.genreNames.count || search.moodNames.count) {
+        return YES;
+    }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    if(search.activityNames.count) {
+        return YES;
+    }
+#pragma clang diagnostic pop
+    return NO;
+}
+
+// INIntentResolutionResult has a private resolvedValue accessor used internally by
+// Intents.framework. We use it only to recover the INMediaItem that Spotify itself
+// resolved from the user's natural-language request.
+static INMediaItem *LCResolvedMediaItem(
+    NSArray<INPlayMediaMediaItemResolutionResult *> *results
+) {
+    SEL selector = NSSelectorFromString(@"resolvedValue");
+
+    for(INPlayMediaMediaItemResolutionResult *result in results) {
+        if(![result respondsToSelector:selector]) {
+            continue;
+        }
+
+        id (*invoke)(id, SEL) = (void *)objc_msgSend;
+        id value = invoke(result, selector);
+        if([value isKindOfClass:INMediaItem.class]) {
+            INMediaItem *item = value;
+            NSLog(@"[LCSiri] Spotify resolved media item title=%@ identifier=%@",
+                  item.title, item.identifier);
+            return item;
+        }
+    }
+    return nil;
+}
+
+static INPlayMediaIntent *LCIntentByReplacingMediaItem(
+    INPlayMediaIntent *source,
+    INMediaItem *item
+) {
+    return [[INPlayMediaIntent alloc]
+        initWithMediaItems:item ? @[item] : source.mediaItems
+        mediaContainer:source.mediaContainer
+        playShuffled:source.playShuffled
+        playbackRepeatMode:source.playbackRepeatMode
+        resumePlayback:source.resumePlayback
+        playbackQueueLocation:source.playbackQueueLocation
+        playbackSpeed:source.playbackSpeed
+        mediaSearch:source.mediaSearch];
+}
+
+static BOOL LCTryExecuteSpotifyPlayCommand(INPlayMediaIntent *intent) {
+    for(INMediaItem *item in intent.mediaItems ?: @[]) {
+        NSString *identifier = item.identifier;
+        if(![identifier hasPrefix:@"spotify:play-command:"]) {
+            continue;
+        }
+
+        NSURL *url = [NSURL URLWithString:identifier];
+        if(!url) {
+            continue;
+        }
+
+        NSLog(@"[LCSiri] Executing Spotify native play-command");
+        if(LCDeliverURLDirectlyToActiveGuest(url)) {
+            return YES;
+        }
+
+        [UIApplication.sharedApplication openURL:url
+                                         options:@{}
+                               completionHandler:^(BOOL success) {
+            NSLog(@"[LCSiri] Spotify play-command system fallback success=%d", success);
+        }];
+        return YES;
+    }
+    return NO;
 }
 
 @interface LCSiriGuestMediaIntentHandler : NSObject <INPlayMediaIntentHandling>
+@property(nonatomic, strong) id<INPlayMediaIntentHandling> nativeHandler;
 + (instancetype)sharedHandler;
+- (void)configureNativeHandler:(id<INPlayMediaIntentHandling>)handler;
 @end
 
 @implementation LCSiriGuestMediaIntentHandler
@@ -336,25 +406,37 @@ static NSString *LCSpotifyGenreSlug(NSString *genre) {
     return handler;
 }
 
+- (void)configureNativeHandler:(id<INPlayMediaIntentHandling>)handler {
+    self.nativeHandler = handler;
+}
+
 - (void)resolveMediaItemsForPlayMedia:(INPlayMediaIntent *)intent
                       withCompletion:(void (^)(NSArray<INPlayMediaMediaItemResolutionResult *> *))completion {
-    INMediaSearch *search = intent.mediaSearch;
-    NSMutableArray<NSString *> *parts = [NSMutableArray new];
-    for(NSString *value in @[
-        search.mediaName ?: @"",
-        search.artistName ?: @"",
-        search.albumName ?: @""
-    ]) {
-        if(value.length) [parts addObject:value];
-    }
-    if(search.genreNames.count) [parts addObjectsFromArray:search.genreNames];
-    if(search.moodNames.count) [parts addObjectsFromArray:search.moodNames];
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    if(search.activityNames.count) [parts addObjectsFromArray:search.activityNames];
-#pragma clang diagnostic pop
+    id<INPlayMediaIntentHandling> native = self.nativeHandler;
 
-    NSString *title = parts.count ? [parts componentsJoinedByString:@" "] : @"Spotify";
+    if(native &&
+       [native respondsToSelector:@selector(resolveMediaItemsForPlayMedia:withCompletion:)]) {
+        NSLog(@"[LCSiri] Asking Spotify native resolver for media items");
+        [native resolveMediaItemsForPlayMedia:intent
+                               withCompletion:^(NSArray<INPlayMediaMediaItemResolutionResult *> *results) {
+            INMediaItem *item = LCResolvedMediaItem(results);
+            if(item) {
+                NSLog(@"[LCSiri] Native resolver produced Spotify identifier %@", item.identifier);
+            } else {
+                NSLog(@"[LCSiri] Native resolver returned no directly resolved media item");
+            }
+            completion(results);
+        }];
+        return;
+    }
+
+    NSString *title = intent.mediaSearch.mediaName;
+    if(title.length == 0) title = intent.mediaSearch.artistName;
+    if(title.length == 0) title = intent.mediaSearch.albumName;
+    if(title.length == 0) title = intent.mediaSearch.genreNames.firstObject;
+    if(title.length == 0) title = intent.mediaSearch.moodNames.firstObject;
+    if(title.length == 0) title = @"Spotify";
+
     INMediaItem *item = [[INMediaItem alloc] initWithIdentifier:@"livecontainer.spotify"
                                                           title:title
                                                            type:INMediaItemTypeMusic
@@ -364,44 +446,42 @@ static NSString *LCSpotifyGenreSlug(NSString *genre) {
 
 - (void)handlePlayMedia:(INPlayMediaIntent *)intent
              completion:(void (^)(INPlayMediaIntentResponse *))completion {
-    NSDictionary *descriptor = LCSiriSpotifySearchDescriptor(intent.mediaSearch);
-
-    // Generic playback remains the proven v4 path: start Liked Songs immediately.
-    if(!descriptor) {
-        NSString *uri = @"spotify:internal:collection:tracks";
-        NSLog(@"[LCSiri] Generic PlayMedia -> %@", uri);
-        completion([[INPlayMediaIntentResponse alloc] initWithCode:INPlayMediaIntentResponseCodeSuccess
-                                                      userActivity:nil]);
-
-        dispatch_async(dispatch_get_main_queue(), ^{
-            NSURL *url = [NSURL URLWithString:uri];
-            if(!url) return;
-            if(LCDeliverURLDirectlyToActiveGuest(url)) return;
-            [UIApplication.sharedApplication openURL:url options:@{} completionHandler:nil];
-        });
+    // After Siri's resolution pass, Spotify's resolved INMediaItem normally carries
+    // a spotify:play-command:<payload> identifier. Execute that command directly so
+    // the guest does not depend on iOS believing native Spotify is installed.
+    if(LCTryExecuteSpotifyPlayCommand(intent)) {
+        completion([[INPlayMediaIntentResponse alloc]
+            initWithCode:INPlayMediaIntentResponseCodeSuccess
+            userActivity:nil]);
         return;
     }
 
-    // Siri only needs acknowledgement here; actual Spotify catalog lookup and
-    // playback are completed inside the running guest with Spotify's own session token.
-    completion([[INPlayMediaIntentResponse alloc] initWithCode:INPlayMediaIntentResponseCodeSuccess
-                                                  userActivity:nil]);
+    id<INPlayMediaIntentHandling> native = self.nativeHandler;
+    if(native && [native respondsToSelector:@selector(handlePlayMedia:completion:)]) {
+        NSLog(@"[LCSiri] No direct play-command on intent; trying Spotify native handle");
+        [native handlePlayMedia:intent completion:^(INPlayMediaIntentResponse *response) {
+            if(response.code == INPlayMediaIntentResponseCodeSuccess ||
+               response.code == INPlayMediaIntentResponseCodeInProgress ||
+               response.code == INPlayMediaIntentResponseCodeHandleInApp) {
+                completion(response);
+                return;
+            }
 
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSDictionary *resolved = LCSiriResolveSpotifyCatalog(intent.mediaSearch);
-        if(!resolved) {
-            NSLog(@"[LCSiri] Specific media request could not be resolved");
-            return;
+            NSLog(@"[LCSiri] Spotify native handle failed code=%ld", (long)response.code);
+            completion(response);
+        }];
+        return;
+    }
+
+    // Generic fallback remains the known-working Liked Songs playback route.
+    NSURL *url = [NSURL URLWithString:@"spotify:internal:collection:tracks"];
+    completion([[INPlayMediaIntentResponse alloc]
+        initWithCode:INPlayMediaIntentResponseCodeSuccess
+        userActivity:nil]);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if(!LCDeliverURLDirectlyToActiveGuest(url)) {
+            [UIApplication.sharedApplication openURL:url options:@{} completionHandler:nil];
         }
-
-        dispatch_async(dispatch_get_main_queue(), ^{
-            LCSiriExecuteResolvedSpotifyURI(
-                resolved[@"uri"],
-                resolved[@"name"],
-                [resolved[@"shuffle"] boolValue],
-                UIApplication.sharedApplication.delegate
-            );
-        });
     });
 }
 
@@ -415,70 +495,32 @@ static id LCOriginalSpotifyHandlerForIntent(
     UIApplication *application,
     INIntent *intent
 ) {
-    if(!LCOriginalGuestIntentHandlerIMP) return nil;
+    if(!LCOriginalGuestIntentHandlerIMP) {
+        return nil;
+    }
+
     id (*original)(id, SEL, UIApplication *, INIntent *) = (void *)LCOriginalGuestIntentHandlerIMP;
-    return original(
+    id handler = original(
         delegate,
         @selector(application:handlerForIntent:),
         application,
         intent
     );
-}
 
-static void LCSiriExecuteResolvedSpotifyURI(
-    NSString *uri,
-    NSString *title,
-    BOOL shuffle,
-    id<UIApplicationDelegate> delegate
-) {
-    NSString *playCommand = LCSiriSpotifyPlayCommand(uri, title, shuffle);
-    if(!playCommand.length) return;
-
-    INMediaItem *item = [[INMediaItem alloc] initWithIdentifier:playCommand
-                                                          title:title ?: @"Spotify"
-                                                           type:INMediaItemTypeMusic
-                                                        artwork:nil];
-
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    INPlayMediaIntent *resolvedIntent = [[INPlayMediaIntent alloc]
-        initWithMediaItems:@[item]
-        mediaContainer:nil
-        playShuffled:@(shuffle)
-        playbackRepeatMode:INPlaybackRepeatModeNone
-        resumePlayback:@NO];
-#pragma clang diagnostic pop
-
-    id nativeHandler = LCOriginalSpotifyHandlerForIntent(
-        delegate,
-        UIApplication.sharedApplication,
-        resolvedIntent
-    );
-
-    if(nativeHandler && [nativeHandler respondsToSelector:@selector(handlePlayMedia:completion:)]) {
-        NSLog(@"[LCSiri] Executing resolved %@ via Spotify native handler", uri);
-        id<INPlayMediaIntentHandling> handler = nativeHandler;
-        [handler handlePlayMedia:resolvedIntent completion:^(INPlayMediaIntentResponse *response) {
-            NSLog(@"[LCSiri] Spotify resolved command response=%ld", (long)response.code);
-        }];
-        return;
+    if(handler) {
+        NSLog(@"[LCSiri] Spotify supplied native intent handler %@", NSStringFromClass([handler class]));
     }
-
-    // Some Spotify builds accept play-command identifiers through their URL router.
-    NSURL *commandURL = [NSURL URLWithString:playCommand];
-    if(commandURL && LCDeliverURLDirectlyToActiveGuest(commandURL)) {
-        NSLog(@"[LCSiri] Executed resolved %@ via direct play-command URL", uri);
-        return;
-    }
-
-    NSLog(@"[LCSiri] No executable Spotify play-command path for %@", uri);
+    return handler;
 }
 
 static void LCExecutePendingSpotifyPlayMediaIntent(id<UIApplicationDelegate> delegate) {
     NSUserDefaults *shared = NSUserDefaults.lcSharedDefaults;
     NSData *data = [shared dataForKey:@"LCSiriPendingPlayMediaIntent"];
     NSDate *date = [shared objectForKey:@"LCSiriPendingPlayMediaDate"];
-    if(!data) return;
+
+    if(!data) {
+        return;
+    }
 
     [shared removeObjectForKey:@"LCSiriPendingPlayMediaIntent"];
     [shared removeObjectForKey:@"LCSiriPendingPlayMediaDate"];
@@ -498,29 +540,88 @@ static void LCExecutePendingSpotifyPlayMediaIntent(id<UIApplicationDelegate> del
         return;
     }
 
-    NSLog(@"[LCSiri] Executing pending specific PlayMedia request inside Spotify guest");
-    [[LCSiriGuestMediaIntentHandler sharedHandler]
-        handlePlayMedia:intent
-        completion:^(INPlayMediaIntentResponse *response) {
-            NSLog(@"[LCSiri] Pending request accepted response=%ld", (long)response.code);
+    id<INPlayMediaIntentHandling> nativeHandler = LCOriginalSpotifyHandlerForIntent(
+        delegate,
+        UIApplication.sharedApplication,
+        intent
+    );
+
+    if(nativeHandler &&
+       [nativeHandler respondsToSelector:@selector(resolveMediaItemsForPlayMedia:withCompletion:)]) {
+        NSLog(@"[LCSiri] Cold start: resolving specific request with Spotify native resolver");
+        [nativeHandler resolveMediaItemsForPlayMedia:intent
+                                      withCompletion:^(NSArray<INPlayMediaMediaItemResolutionResult *> *results) {
+            INMediaItem *resolvedItem = LCResolvedMediaItem(results);
+            if(resolvedItem) {
+                INPlayMediaIntent *resolvedIntent =
+                    LCIntentByReplacingMediaItem(intent, resolvedItem);
+
+                if(LCTryExecuteSpotifyPlayCommand(resolvedIntent)) {
+                    NSLog(@"[LCSiri] Cold start: executed resolved Spotify play-command");
+                    return;
+                }
+
+                NSLog(@"[LCSiri] Cold start: resolved item had no executable play-command; trying native handle");
+                [nativeHandler handlePlayMedia:resolvedIntent
+                                    completion:^(INPlayMediaIntentResponse *response) {
+                    NSLog(@"[LCSiri] Spotify resolved native response code=%ld", (long)response.code);
+                }];
+                return;
+            }
+
+            NSLog(@"[LCSiri] Cold start: Spotify native resolver produced no resolved item");
+            [nativeHandler handlePlayMedia:intent
+                                completion:^(INPlayMediaIntentResponse *response) {
+                NSLog(@"[LCSiri] Spotify unresolved native response code=%ld", (long)response.code);
+            }];
         }];
+        return;
+    }
+
+    NSLog(@"[LCSiri] Cold start: Spotify native resolver unavailable");
+    LCSiriGuestMediaIntentHandler *fallback = [LCSiriGuestMediaIntentHandler sharedHandler];
+    [fallback configureNativeHandler:nativeHandler];
+    [fallback handlePlayMedia:intent completion:^(INPlayMediaIntentResponse *response) {
+        NSLog(@"[LCSiri] Fallback pending response code=%ld", (long)response.code);
+    }];
 }
 
 static id LCGuestApplicationHandlerForIntent(id self, SEL _cmd, UIApplication *application, INIntent *intent) {
     NSURL *spotifyProbe = [NSURL URLWithString:@"spotify:"];
     if([intent isKindOfClass:INPlayMediaIntent.class] && spotifyProbe && canAppOpenItself(spotifyProbe)) {
-        NSLog(@"[LCSiri] Handling PlayMedia through LiveContainer Spotify bridge");
-        return [LCSiriGuestMediaIntentHandler sharedHandler];
+        INPlayMediaIntent *playIntent = (INPlayMediaIntent *)intent;
+        LCSiriGuestMediaIntentHandler *bridge = [LCSiriGuestMediaIntentHandler sharedHandler];
+
+        if(!LCHasSpecificMediaRequest(playIntent)) {
+            [bridge configureNativeHandler:nil];
+            NSLog(@"[LCSiri] Generic PlayMedia request -> LC Liked Songs bridge");
+            return bridge;
+        }
+
+        id<INPlayMediaIntentHandling> native =
+            LCOriginalSpotifyHandlerForIntent(self, application, intent);
+        [bridge configureNativeHandler:native];
+
+        if(native) {
+            NSLog(@"[LCSiri] Specific PlayMedia request -> Spotify resolver + LC executor");
+        } else {
+            NSLog(@"[LCSiri] Specific PlayMedia request but Spotify native handler unavailable");
+        }
+        return bridge;
     }
 
     return LCOriginalSpotifyHandlerForIntent(self, application, intent);
 }
 
 static void LCInstallGuestIntentHandlerIfNeeded(id<UIApplicationDelegate> delegate) {
-    if(!delegate || LCHookedGuestDelegateClass == [delegate class]) return;
+    if(!delegate || LCHookedGuestDelegateClass == [delegate class]) {
+        return;
+    }
 
     NSURL *spotifyProbe = [NSURL URLWithString:@"spotify:"];
-    if(!spotifyProbe || !canAppOpenItself(spotifyProbe)) return;
+    if(!spotifyProbe || !canAppOpenItself(spotifyProbe)) {
+        return;
+    }
 
     Class cls = [delegate class];
     SEL selector = @selector(application:handlerForIntent:);
@@ -533,7 +634,7 @@ static void LCInstallGuestIntentHandlerIfNeeded(id<UIApplicationDelegate> delega
     }
 
     LCHookedGuestDelegateClass = cls;
-    NSLog(@"[LCSiri] Installed Spotify Siri bridge on %@", NSStringFromClass(cls));
+    NSLog(@"[LCSiri] Installed warm-state Siri bridge on %@", NSStringFromClass(cls));
 
     dispatch_after(
         dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.75 * NSEC_PER_SEC)),
