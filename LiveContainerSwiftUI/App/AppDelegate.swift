@@ -1,12 +1,16 @@
 import UIKit
 import SwiftUI
 import Intents
+import AppIntents
 
 @objc class AppDelegate: UIResponder, UIApplicationDelegate {
         
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? ) -> Bool {
         application.shortcutItems = nil
         UserDefaults.standard.removeObject(forKey: "LCNeedToAcquireJIT")
+        if #available(iOS 16.0, *) {
+            LCUniversalMediaShortcuts.updateAppShortcutParameters()
+        }
         
         NotificationCenter.default.addObserver(forName: UIApplication.willTerminateNotification, object: nil, queue: .main) { _ in
             // Fix launching app if user opens JIT waiting dialog and kills the app. Won't trigger normally.
@@ -326,3 +330,459 @@ final class SiriMediaIntentHandler: NSObject, INPlayMediaIntentHandling {
 
         return spotifySearchDescriptor(intent.mediaSearch) != nil
     }}
+
+
+@available(iOS 16.0, *)
+enum LCUniversalMediaProvider: String {
+    case spotify
+    case youtube
+    case youtubeMusic
+    case deezer
+
+    var displayName: String {
+        switch self {
+        case .spotify: return "Spotify"
+        case .youtube: return "YouTube"
+        case .youtubeMusic: return "YouTube Music"
+        case .deezer: return "Deezer"
+        }
+    }
+
+    var bundleIdentifiers: Set<String> {
+        switch self {
+        case .spotify:
+            return ["com.spotify.client"]
+        case .youtube:
+            return ["com.google.ios.youtube"]
+        case .youtubeMusic:
+            return ["com.google.ios.youtubemusic"]
+        case .deezer:
+            return ["com.deezer.deezer"]
+        }
+    }
+
+    var nameAliases: [String] {
+        switch self {
+        case .spotify: return ["spotify"]
+        case .youtube: return ["youtube"]
+        case .youtubeMusic: return ["youtube music", "yt music", "ytmusic"]
+        case .deezer: return ["deezer"]
+        }
+    }
+}
+
+@available(iOS 16.0, *)
+@MainActor
+enum LCUniversalMediaRouter {
+    private static let genreWords: Set<String> = [
+        "jazz", "rock", "pop", "house", "techno", "trance", "classical",
+        "hip hop", "hip-hop", "rap", "metal", "blues", "country", "reggae",
+        "r&b", "soul", "funk", "ambient", "edm", "dance"
+    ]
+
+    static func route(provider: LCUniversalMediaProvider, query: String?) async throws {
+        let normalizedQuery = query?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "something", with: "", options: [.caseInsensitive])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard let guest = findGuest(provider) else {
+            diag("universal provider=\(provider.displayName) unavailable")
+            throw NSError(
+                domain: "LiveContainer.UniversalMediaRouter",
+                code: 404,
+                userInfo: [NSLocalizedDescriptionKey: "\(provider.displayName) is not installed in LiveContainer."]
+            )
+        }
+
+        diag(
+            "universal route provider=\(provider.displayName) guest=\(guest.displayName)|\(guest.bundleIdentifier) query=\(normalizedQuery ?? "<generic>")"
+        )
+
+        switch provider {
+        case .spotify:
+            try await routeSpotify(guest: guest, query: normalizedQuery)
+
+        case .youtube:
+            try await routeYouTube(
+                guest: guest,
+                query: normalizedQuery,
+                music: false
+            )
+
+        case .youtubeMusic:
+            try await routeYouTube(
+                guest: guest,
+                query: normalizedQuery,
+                music: true
+            )
+
+        case .deezer:
+            let launchURL: String?
+            if let q = normalizedQuery, !q.isEmpty {
+                let encoded = q.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? q
+                launchURL = "deezer://search?q=\(encoded)"
+            } else {
+                launchURL = rootSchemeURL(for: guest, preferred: ["deezer"])
+            }
+            try await guest.runApp(multitask: false, urlStr: launchURL)
+        }
+    }
+
+    private static func routeSpotify(guest: LCAppModel, query: String?) async throws {
+        guard let query, !query.isEmpty else {
+            try await guest.runApp(
+                multitask: false,
+                urlStr: "spotify:internal:collection:tracks"
+            )
+            return
+        }
+
+        let lower = query.lowercased()
+        let isGenre = genreWords.contains(lower)
+        let descriptor: [String: Any] = [
+            "q": query,
+            "type": isGenre ? "playlist" : "track",
+            "shuffle": isGenre
+        ]
+
+        let data = try JSONSerialization.data(withJSONObject: descriptor)
+        LCUtils.appGroupUserDefault.set(data, forKey: "LCUniversalSpotifyDescriptor")
+        LCUtils.appGroupUserDefault.set(Date(), forKey: "LCUniversalSpotifyDescriptorDate")
+        diag("universal spotify queued descriptor=\(descriptor)")
+        try await guest.runApp(multitask: false, urlStr: nil)
+    }
+
+    private static func routeYouTube(
+        guest: LCAppModel,
+        query: String?,
+        music: Bool
+    ) async throws {
+        let effectiveQuery: String
+        if let query, !query.isEmpty {
+            effectiveQuery = query
+        } else {
+            effectiveQuery = music ? "music" : "trending music"
+        }
+
+        if let videoID = await resolveYouTubeVideoID(query: effectiveQuery, music: music) {
+            let preferredSchemes = music
+                ? ["youtubemusic", "vnd.youtube.music"]
+                : ["youtube", "vnd.youtube"]
+            let scheme = firstScheme(for: guest, preferred: preferredSchemes)
+                ?? (music ? "youtubemusic" : "youtube")
+            let launchURL = "\(scheme)://watch?v=\(videoID)"
+            diag(
+                "universal youtube resolved provider=\(music ? "YouTube Music" : "YouTube") query=\(effectiveQuery) videoID=\(videoID) scheme=\(scheme)"
+            )
+            try await guest.runApp(multitask: false, urlStr: launchURL)
+            return
+        }
+
+        let encoded = effectiveQuery.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)
+            ?? effectiveQuery
+        let fallback: String
+        if music {
+            let scheme = firstScheme(for: guest, preferred: ["youtubemusic"])
+                ?? "youtubemusic"
+            fallback = "\(scheme)://search?q=\(encoded)"
+        } else {
+            let scheme = firstScheme(for: guest, preferred: ["youtube", "vnd.youtube"])
+                ?? "youtube"
+            fallback = "\(scheme)://results?search_query=\(encoded)"
+        }
+        diag("universal youtube search fallback url=\(fallback)")
+        try await guest.runApp(multitask: false, urlStr: fallback)
+    }
+
+    private static func resolveYouTubeVideoID(query: String, music: Bool) async -> String? {
+        var components = URLComponents(
+            string: music
+                ? "https://music.youtube.com/search"
+                : "https://www.youtube.com/results"
+        )
+        components?.queryItems = [
+            URLQueryItem(name: music ? "q" : "search_query", value: query)
+        ]
+        guard let url = components?.url else { return nil }
+
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 8
+        request.setValue(
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148",
+            forHTTPHeaderField: "User-Agent"
+        )
+        request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                diag("universal youtube web lookup status=\(http.statusCode)")
+                return nil
+            }
+
+            guard let html = String(data: data, encoding: .utf8) else {
+                return nil
+            }
+
+            let regex = try NSRegularExpression(
+                pattern: #"\"videoId\":\"([A-Za-z0-9_-]{11})\""#
+            )
+            let range = NSRange(html.startIndex..<html.endIndex, in: html)
+            guard
+                let match = regex.firstMatch(in: html, range: range),
+                match.numberOfRanges > 1,
+                let idRange = Range(match.range(at: 1), in: html)
+            else {
+                diag("universal youtube web lookup found no videoID")
+                return nil
+            }
+
+            return String(html[idRange])
+        } catch {
+            diag("universal youtube web lookup error=\(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    private static func findGuest(_ provider: LCUniversalMediaProvider) -> LCAppModel? {
+        let allApps = DataManager.shared.model.apps + DataManager.shared.model.hiddenApps
+        if let exact = allApps.first(where: {
+            provider.bundleIdentifiers.contains($0.bundleIdentifier.lowercased())
+        }) {
+            return exact
+        }
+
+        return allApps.first(where: { app in
+            let name = app.displayName.lowercased()
+            return provider.nameAliases.contains(where: { name.contains($0) })
+        })
+    }
+
+    private static func firstScheme(
+        for guest: LCAppModel,
+        preferred: [String]
+    ) -> String? {
+        let schemes = (guest.appInfo.urlSchemes() as? [String]) ?? []
+        for wanted in preferred {
+            if let match = schemes.first(where: {
+                $0.caseInsensitiveCompare(wanted) == .orderedSame
+            }) {
+                return match
+            }
+        }
+        return schemes.first
+    }
+
+    private static func rootSchemeURL(
+        for guest: LCAppModel,
+        preferred: [String]
+    ) -> String? {
+        guard let scheme = firstScheme(for: guest, preferred: preferred) else {
+            return nil
+        }
+        return "\(scheme)://"
+    }
+
+    private static func diag(_ message: String) {
+        let formatter = ISO8601DateFormatter()
+        let line = "[\(formatter.string(from: Date()))] ROUTER \(message)"
+        var lines = LCUtils.appGroupUserDefault.stringArray(forKey: "LCSiriDiagnosticLog") ?? []
+        lines.append(line)
+        if lines.count > 250 {
+            lines.removeFirst(lines.count - 250)
+        }
+        LCUtils.appGroupUserDefault.set(lines, forKey: "LCSiriDiagnosticLog")
+        NSLog("[LCMediaRouter] %@", message)
+    }
+}
+
+@available(iOS 16.0, *)
+struct LCPlaySpotifyIntent: AppIntent {
+    static var title: LocalizedStringResource = "Play on Spotify"
+    static var description = IntentDescription("Play media in the Spotify guest inside LiveContainer.")
+    static var openAppWhenRun = true
+
+    @Parameter(title: "What to play")
+    var query: String
+
+    @MainActor
+    func perform() async throws -> some IntentResult {
+        try await LCUniversalMediaRouter.route(provider: .spotify, query: query)
+        return .result()
+    }
+}
+
+@available(iOS 16.0, *)
+struct LCPlaySomethingSpotifyIntent: AppIntent {
+    static var title: LocalizedStringResource = "Play something on Spotify"
+    static var openAppWhenRun = true
+
+    @MainActor
+    func perform() async throws -> some IntentResult {
+        try await LCUniversalMediaRouter.route(provider: .spotify, query: nil)
+        return .result()
+    }
+}
+
+@available(iOS 16.0, *)
+struct LCPlayYouTubeIntent: AppIntent {
+    static var title: LocalizedStringResource = "Play on YouTube"
+    static var description = IntentDescription("Play a matching video in the YouTube guest inside LiveContainer.")
+    static var openAppWhenRun = true
+
+    @Parameter(title: "What to play")
+    var query: String
+
+    @MainActor
+    func perform() async throws -> some IntentResult {
+        try await LCUniversalMediaRouter.route(provider: .youtube, query: query)
+        return .result()
+    }
+}
+
+@available(iOS 16.0, *)
+struct LCPlaySomethingYouTubeIntent: AppIntent {
+    static var title: LocalizedStringResource = "Play something on YouTube"
+    static var openAppWhenRun = true
+
+    @MainActor
+    func perform() async throws -> some IntentResult {
+        try await LCUniversalMediaRouter.route(provider: .youtube, query: nil)
+        return .result()
+    }
+}
+
+@available(iOS 16.0, *)
+struct LCPlayYouTubeMusicIntent: AppIntent {
+    static var title: LocalizedStringResource = "Play on YouTube Music"
+    static var description = IntentDescription("Play a matching song in the YouTube Music guest inside LiveContainer.")
+    static var openAppWhenRun = true
+
+    @Parameter(title: "What to play")
+    var query: String
+
+    @MainActor
+    func perform() async throws -> some IntentResult {
+        try await LCUniversalMediaRouter.route(provider: .youtubeMusic, query: query)
+        return .result()
+    }
+}
+
+@available(iOS 16.0, *)
+struct LCPlaySomethingYouTubeMusicIntent: AppIntent {
+    static var title: LocalizedStringResource = "Play something on YouTube Music"
+    static var openAppWhenRun = true
+
+    @MainActor
+    func perform() async throws -> some IntentResult {
+        try await LCUniversalMediaRouter.route(provider: .youtubeMusic, query: nil)
+        return .result()
+    }
+}
+
+@available(iOS 16.0, *)
+struct LCPlayDeezerIntent: AppIntent {
+    static var title: LocalizedStringResource = "Play on Deezer"
+    static var description = IntentDescription("Play media in the Deezer guest inside LiveContainer.")
+    static var openAppWhenRun = true
+
+    @Parameter(title: "What to play")
+    var query: String
+
+    @MainActor
+    func perform() async throws -> some IntentResult {
+        try await LCUniversalMediaRouter.route(provider: .deezer, query: query)
+        return .result()
+    }
+}
+
+@available(iOS 16.0, *)
+struct LCPlaySomethingDeezerIntent: AppIntent {
+    static var title: LocalizedStringResource = "Play something on Deezer"
+    static var openAppWhenRun = true
+
+    @MainActor
+    func perform() async throws -> some IntentResult {
+        try await LCUniversalMediaRouter.route(provider: .deezer, query: nil)
+        return .result()
+    }
+}
+
+@available(iOS 16.0, *)
+struct LCUniversalMediaShortcuts: AppShortcutsProvider {
+    static var appShortcuts: [AppShortcut] {
+        AppShortcut(
+            intent: LCPlaySpotifyIntent(),
+            phrases: [
+                "Play \(.$query) on Spotify with \(.applicationName)",
+                "\(.applicationName) play \(.$query) on Spotify"
+            ],
+            shortTitle: "Spotify",
+            systemImageName: "music.note"
+        )
+        AppShortcut(
+            intent: LCPlaySomethingSpotifyIntent(),
+            phrases: [
+                "Play something on Spotify with \(.applicationName)",
+                "\(.applicationName) play something on Spotify"
+            ],
+            shortTitle: "Spotify Something",
+            systemImageName: "music.note.list"
+        )
+        AppShortcut(
+            intent: LCPlayYouTubeIntent(),
+            phrases: [
+                "Play \(.$query) on YouTube with \(.applicationName)",
+                "\(.applicationName) play \(.$query) on YouTube"
+            ],
+            shortTitle: "YouTube",
+            systemImageName: "play.rectangle"
+        )
+        AppShortcut(
+            intent: LCPlaySomethingYouTubeIntent(),
+            phrases: [
+                "Play something on YouTube with \(.applicationName)",
+                "\(.applicationName) play something on YouTube"
+            ],
+            shortTitle: "YouTube Something",
+            systemImageName: "play.rectangle"
+        )
+        AppShortcut(
+            intent: LCPlayYouTubeMusicIntent(),
+            phrases: [
+                "Play \(.$query) on YouTube Music with \(.applicationName)",
+                "\(.applicationName) play \(.$query) on YouTube Music"
+            ],
+            shortTitle: "YouTube Music",
+            systemImageName: "music.note"
+        )
+        AppShortcut(
+            intent: LCPlaySomethingYouTubeMusicIntent(),
+            phrases: [
+                "Play something on YouTube Music with \(.applicationName)",
+                "\(.applicationName) play something on YouTube Music"
+            ],
+            shortTitle: "YouTube Music Something",
+            systemImageName: "music.note.list"
+        )
+        AppShortcut(
+            intent: LCPlayDeezerIntent(),
+            phrases: [
+                "Play \(.$query) on Deezer with \(.applicationName)",
+                "\(.applicationName) play \(.$query) on Deezer"
+            ],
+            shortTitle: "Deezer",
+            systemImageName: "waveform"
+        )
+        AppShortcut(
+            intent: LCPlaySomethingDeezerIntent(),
+            phrases: [
+                "Play something on Deezer with \(.applicationName)",
+                "\(.applicationName) play something on Deezer"
+            ],
+            shortTitle: "Deezer Something",
+            systemImageName: "waveform"
+        )
+    }
+}
