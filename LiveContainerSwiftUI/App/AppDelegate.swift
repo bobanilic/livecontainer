@@ -139,14 +139,30 @@ final class SiriMediaIntentHandler: NSObject, INPlayMediaIntentHandling {
             return type
         }()
 
+        let descriptor = Self.spotifySearchDescriptor(search)
+        let identifier: String = {
+            guard
+                let descriptor,
+                let data = try? JSONSerialization.data(withJSONObject: descriptor),
+                !data.isEmpty
+            else {
+                return "livecontainer.spotify"
+            }
+            return "livecontainer.spotify.query:" + data.base64EncodedString()
+        }()
+
         let item = INMediaItem(
-            identifier: "livecontainer.spotify",
+            identifier: identifier,
             title: title,
             type: mediaType,
             artwork: nil
         )
 
-        NSLog("[LCSiri] resolveMediaItems: resolved %@", title)
+        NSLog(
+            "[LCSiri] resolveMediaItems: resolved %@ specific=%d",
+            title,
+            descriptor == nil ? 0 : 1
+        )
         completion(INPlayMediaMediaItemResolutionResult.successes(with: [item]))
     }
 
@@ -202,24 +218,49 @@ final class SiriMediaIntentHandler: NSObject, INPlayMediaIntentHandling {
         }
     }
 
+    private static func spotifySearchDescriptor(_ search: INMediaSearch?) -> [String: Any]? {
+        guard let search else { return nil }
+
+        func firstNonEmpty(_ values: [String]?) -> String? {
+            values?.first {
+                !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
+        }
+
+        if let genre = firstNonEmpty(search.genreNames) {
+            return ["q": genre, "type": "playlist", "shuffle": true]
+        }
+        if let mood = firstNonEmpty(search.moodNames) {
+            return ["q": mood, "type": "playlist", "shuffle": true]
+        }
+        if let activity = firstNonEmpty(search.activityNames) {
+            return ["q": activity, "type": "playlist", "shuffle": true]
+        }
+
+        let media = search.mediaName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let artist = search.artistName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let album = search.albumName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        if !media.isEmpty {
+            let query = artist.isEmpty ? media : "\(media) \(artist)"
+            return ["q": query, "type": "track", "shuffle": false]
+        }
+        if !album.isEmpty {
+            let query = artist.isEmpty ? album : "\(album) \(artist)"
+            return ["q": query, "type": "album", "shuffle": false]
+        }
+        if !artist.isEmpty {
+            return ["q": artist, "type": "artist", "shuffle": true]
+        }
+        return nil
+    }
+
     private static func hasSpecificMediaRequest(_ intent: INPlayMediaIntent) -> Bool {
-        guard let search = intent.mediaSearch else { return false }
-
-        let scalarTerms = [
-            search.mediaName,
-            search.artistName,
-            search.albumName
-        ]
-
-        if scalarTerms.contains(where: {
-            guard let value = $0 else { return false }
-            return !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        }) {
+        if intent.mediaItems?.contains(where: {
+            $0.identifier?.hasPrefix("livecontainer.spotify.query:") == true
+        }) == true {
             return true
         }
 
-        if !(search.genreNames ?? []).isEmpty { return true }
-        if !(search.moodNames ?? []).isEmpty { return true }
-        if !(search.activityNames ?? []).isEmpty { return true }
-        return false
+        return spotifySearchDescriptor(intent.mediaSearch) != nil
     }}
