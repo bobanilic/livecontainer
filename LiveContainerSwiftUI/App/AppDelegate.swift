@@ -598,17 +598,47 @@ enum LCUniversalMediaRouter {
 }
 
 @available(iOS 16.0, *)
+struct LCMediaQueryEntity: AppEntity {
+    static var typeDisplayRepresentation = TypeDisplayRepresentation(name: "Media")
+    static var defaultQuery = LCMediaQueryEntityQuery()
+
+    let id: String
+    let text: String
+
+    var displayRepresentation: DisplayRepresentation {
+        DisplayRepresentation(title: "\(text)")
+    }
+}
+
+@available(iOS 16.0, *)
+struct LCMediaQueryEntityQuery: EntityStringQuery {
+    func entities(for identifiers: [String]) async throws -> [LCMediaQueryEntity] {
+        identifiers.map { LCMediaQueryEntity(id: $0, text: $0) }
+    }
+
+    func entities(matching string: String) async throws -> [LCMediaQueryEntity] {
+        let value = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return [] }
+        return [LCMediaQueryEntity(id: value, text: value)]
+    }
+
+    func suggestedEntities() async throws -> [LCMediaQueryEntity] {
+        []
+    }
+}
+
+@available(iOS 16.0, *)
 struct LCPlaySpotifyIntent: AppIntent {
     static var title: LocalizedStringResource = "Play on Spotify"
     static var description = IntentDescription("Play media in the Spotify guest inside LiveContainer.")
     static var openAppWhenRun = true
 
     @Parameter(title: "What to play")
-    var query: String
+    var query: LCMediaQueryEntity
 
     @MainActor
     func perform() async throws -> some IntentResult {
-        try await LCUniversalMediaRouter.route(provider: .spotify, query: query)
+        try await LCUniversalMediaRouter.route(provider: .spotify, query: query.text)
         return .result()
     }
 }
@@ -632,11 +662,11 @@ struct LCPlayYouTubeIntent: AppIntent {
     static var openAppWhenRun = true
 
     @Parameter(title: "What to play")
-    var query: String
+    var query: LCMediaQueryEntity
 
     @MainActor
     func perform() async throws -> some IntentResult {
-        try await LCUniversalMediaRouter.route(provider: .youtube, query: query)
+        try await LCUniversalMediaRouter.route(provider: .youtube, query: query.text)
         return .result()
     }
 }
@@ -660,11 +690,11 @@ struct LCPlayYouTubeMusicIntent: AppIntent {
     static var openAppWhenRun = true
 
     @Parameter(title: "What to play")
-    var query: String
+    var query: LCMediaQueryEntity
 
     @MainActor
     func perform() async throws -> some IntentResult {
-        try await LCUniversalMediaRouter.route(provider: .youtubeMusic, query: query)
+        try await LCUniversalMediaRouter.route(provider: .youtubeMusic, query: query.text)
         return .result()
     }
 }
@@ -688,11 +718,11 @@ struct LCPlayDeezerIntent: AppIntent {
     static var openAppWhenRun = true
 
     @Parameter(title: "What to play")
-    var query: String
+    var query: LCMediaQueryEntity
 
     @MainActor
     func perform() async throws -> some IntentResult {
-        try await LCUniversalMediaRouter.route(provider: .deezer, query: query)
+        try await LCUniversalMediaRouter.route(provider: .deezer, query: query.text)
         return .result()
     }
 }
