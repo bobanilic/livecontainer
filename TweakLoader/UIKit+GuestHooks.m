@@ -3,11 +3,124 @@
 #import "UIKitPrivate.h"
 #import "../LiveContainer/utils.h"
 #import <LocalAuthentication/LocalAuthentication.h>
+#import <Intents/Intents.h>
 #import "Localization.h"
 
 UIInterfaceOrientation LCOrientationLock = UIInterfaceOrientationUnknown;
 NSMutableArray<NSString*>* LCSupportedUrlSchemes = nil;
 BOOL launchURLProcessed = NO;
+
+
+#pragma mark - Siri media bridge while a guest app owns the LiveContainer process
+
+@interface LCSiriGuestMediaIntentHandler : NSObject <INPlayMediaIntentHandling>
++ (instancetype)sharedHandler;
+@end
+
+@implementation LCSiriGuestMediaIntentHandler
+
++ (instancetype)sharedHandler {
+    static LCSiriGuestMediaIntentHandler *handler;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        handler = [LCSiriGuestMediaIntentHandler new];
+    });
+    return handler;
+}
+
+- (void)resolveMediaItemsForPlayMedia:(INPlayMediaIntent *)intent
+                      withCompletion:(void (^)(NSArray<INPlayMediaMediaItemResolutionResult *> *))completion {
+    NSString *title = intent.mediaSearch.mediaName;
+    if(title.length == 0) title = intent.mediaSearch.artistName;
+    if(title.length == 0) title = intent.mediaSearch.albumName;
+    if(title.length == 0) title = @"Spotify";
+
+    INMediaItemType mediaType = intent.mediaSearch.mediaType;
+    if(mediaType == INMediaItemTypeUnknown) {
+        mediaType = INMediaItemTypeMusic;
+    }
+
+    INMediaItem *item = [[INMediaItem alloc] initWithIdentifier:@"livecontainer.spotify"
+                                                          title:title
+                                                           type:mediaType
+                                                        artwork:nil];
+    completion([INPlayMediaMediaItemResolutionResult successesWithResolvedMediaItems:@[item]]);
+}
+
+- (void)handlePlayMedia:(INPlayMediaIntent *)intent
+             completion:(void (^)(INPlayMediaIntentResponse *))completion {
+    NSString *uri = @"spotify:internal:collection:tracks";
+
+    NSMutableArray<NSString *> *terms = [NSMutableArray new];
+    if(intent.mediaSearch.mediaName.length) [terms addObject:intent.mediaSearch.mediaName];
+    if(intent.mediaSearch.artistName.length) [terms addObject:intent.mediaSearch.artistName];
+    if(intent.mediaSearch.albumName.length) [terms addObject:intent.mediaSearch.albumName];
+
+    if(terms.count > 0) {
+        NSString *query = [terms componentsJoinedByString:@" "];
+        NSCharacterSet *allowed = [[NSCharacterSet URLQueryAllowedCharacterSet] mutableCopy];
+        NSString *encoded = [query stringByAddingPercentEncodingWithAllowedCharacters:allowed] ?: query;
+        uri = [@"spotify:search:" stringByAppendingString:encoded];
+    }
+
+    NSLog(@"[LCSiri] Guest bridge routing PlayMedia to %@", uri);
+    completion([[INPlayMediaIntentResponse alloc] initWithCode:INPlayMediaIntentResponseCodeSuccess
+                                                  userActivity:nil]);
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSURL *url = [NSURL URLWithString:uri];
+        if(url) {
+            [UIApplication.sharedApplication openURL:url options:@{} completionHandler:^(BOOL success) {
+                NSLog(@"[LCSiri] Guest bridge openURL success=%d", success);
+            }];
+        }
+    });
+}
+
+@end
+
+static IMP LCOriginalGuestIntentHandlerIMP = NULL;
+static Class LCHookedGuestDelegateClass = Nil;
+
+static id LCGuestApplicationHandlerForIntent(id self, SEL _cmd, UIApplication *application, INIntent *intent) {
+    NSURL *spotifyProbe = [NSURL URLWithString:@"spotify:"];
+    if([intent isKindOfClass:INPlayMediaIntent.class] && spotifyProbe && canAppOpenItself(spotifyProbe)) {
+        NSLog(@"[LCSiri] Handling PlayMedia inside active Spotify guest");
+        return [LCSiriGuestMediaIntentHandler sharedHandler];
+    }
+
+    if(LCOriginalGuestIntentHandlerIMP) {
+        id (*original)(id, SEL, UIApplication *, INIntent *) = (void *)LCOriginalGuestIntentHandlerIMP;
+        return original(self, _cmd, application, intent);
+    }
+    return nil;
+}
+
+static void LCInstallGuestIntentHandlerIfNeeded(id<UIApplicationDelegate> delegate) {
+    if(!delegate || LCHookedGuestDelegateClass == object_getClass(delegate)) {
+        return;
+    }
+
+    NSURL *spotifyProbe = [NSURL URLWithString:@"spotify:"];
+    if(!spotifyProbe || !canAppOpenItself(spotifyProbe)) {
+        return;
+    }
+
+    Class cls = object_getClass(delegate);
+    SEL selector = @selector(application:handlerForIntent:);
+    Method method = class_getInstanceMethod(cls, selector);
+
+    if(method) {
+        LCOriginalGuestIntentHandlerIMP = method_getImplementation(method);
+        method_setImplementation(method, (IMP)LCGuestApplicationHandlerForIntent);
+    } else {
+        class_addMethod(cls, selector, (IMP)LCGuestApplicationHandlerForIntent, "@@:@@");
+        LCOriginalGuestIntentHandlerIMP = NULL;
+    }
+
+    LCHookedGuestDelegateClass = cls;
+    NSLog(@"[LCSiri] Installed warm-state Siri bridge on %@", NSStringFromClass(cls));
+}
 
 __attribute__((constructor))
 static void UIKitGuestHooksInit() {
@@ -636,6 +749,7 @@ static LCControlAppURLHandling LCHandleControlAppURL(NSURL *url, NSString** modi
 }
 
 - (void)hook_setDelegate:(id<UIApplicationDelegate>)delegate {
+    LCInstallGuestIntentHandlerIfNeeded(delegate);
     if(![delegate respondsToSelector:@selector(application:configurationForConnectingSceneSession:options:)]) {
         // Fix old apps black screen when UIApplicationSupportsMultipleScenes is YES
         swizzle(UIWindow.class, @selector(makeKeyAndVisible), @selector(hook_makeKeyAndVisible));
