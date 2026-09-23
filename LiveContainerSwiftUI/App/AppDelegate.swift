@@ -98,6 +98,55 @@ final class SiriMediaIntentHandler: NSObject, INPlayMediaIntentHandling {
         "com.spotify.client"
     ]
 
+    /// SiriKit requires media-item resolution for INPlayMediaIntent.
+    /// Without this method Siri accepts the permission/capability registration,
+    /// but the request can terminate with a generic "there's a problem" response
+    /// before the handler is allowed to launch the guest app.
+    func resolveMediaItems(
+        for intent: INPlayMediaIntent,
+        with completion: @escaping ([INPlayMediaMediaItemResolutionResult]) -> Void
+    ) {
+        guard Self.spotifyGuest() != nil else {
+            NSLog("[LCSiri] resolveMediaItems: Spotify guest not found")
+            completion([
+                INPlayMediaMediaItemResolutionResult.unsupported(forReason: .serviceUnavailable)
+            ])
+            return
+        }
+
+        let search = intent.mediaSearch
+        let requestedTitle = [
+            search?.mediaName,
+            search?.artistName,
+            search?.albumName
+        ]
+        .compactMap { value -> String? in
+            guard let value, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return nil
+            }
+            return value
+        }
+        .joined(separator: " ")
+
+        let title = requestedTitle.isEmpty ? "Spotify" : requestedTitle
+        let mediaType: INMediaItemType = {
+            guard let type = search?.mediaType, type != .unknown else {
+                return .music
+            }
+            return type
+        }()
+
+        let item = INMediaItem(
+            identifier: "livecontainer.spotify",
+            title: title,
+            type: mediaType,
+            artwork: nil
+        )
+
+        NSLog("[LCSiri] resolveMediaItems: resolved %@", title)
+        completion(INPlayMediaMediaItemResolutionResult.successes(with: [item]))
+    }
+
     func handle(intent: INPlayMediaIntent, completion: @escaping (INPlayMediaIntentResponse) -> Void) {
         guard let spotify = Self.spotifyGuest() else {
             NSLog("[LCSiri] Spotify guest not found")
