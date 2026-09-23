@@ -766,6 +766,49 @@ static id LCOriginalSpotifyHandlerForIntent(
     return handler;
 }
 
+static void LCExecutePendingUniversalSpotifyDescriptor(id<UIApplicationDelegate> delegate) {
+    NSUserDefaults *shared = NSUserDefaults.lcSharedDefaults;
+    NSData *data = [shared dataForKey:@"LCUniversalSpotifyDescriptor"];
+    NSDate *date = [shared objectForKey:@"LCUniversalSpotifyDescriptorDate"];
+    if(!data) return;
+
+    [shared removeObjectForKey:@"LCUniversalSpotifyDescriptor"];
+    [shared removeObjectForKey:@"LCUniversalSpotifyDescriptorDate"];
+
+    if(date && fabs(date.timeIntervalSinceNow) > 30.0) {
+        LCSiriDiag(@"ignoring stale universal Spotify descriptor");
+        return;
+    }
+
+    NSError *error = nil;
+    NSDictionary *descriptor =
+        [NSJSONSerialization JSONObjectWithData:data options:0 error:&error];
+    if(![descriptor isKindOfClass:NSDictionary.class] || error) {
+        LCSiriDiag(@"universal Spotify descriptor decode failed error=%@", error);
+        return;
+    }
+
+    LCSiriDiag(@"universal Spotify descriptor query=%@ type=%@",
+               descriptor[@"q"], descriptor[@"type"]);
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSDictionary *resolved = LCSiriResolveSpotifyCatalogDescriptor(descriptor);
+        if(!resolved) {
+            LCSiriDiag(@"universal Spotify catalog resolution failed");
+            return;
+        }
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            LCSiriExecuteResolvedSpotifyURI(
+                resolved[@"uri"],
+                resolved[@"name"],
+                [resolved[@"shuffle"] boolValue],
+                delegate
+            );
+        });
+    });
+}
+
 static void LCExecutePendingSpotifyPlayMediaIntent(id<UIApplicationDelegate> delegate) {
     NSUserDefaults *shared = NSUserDefaults.lcSharedDefaults;
     NSData *data = [shared dataForKey:@"LCSiriPendingPlayMediaIntent"];
@@ -930,6 +973,7 @@ static void LCInstallGuestIntentHandlerIfNeeded(id<UIApplicationDelegate> delega
         dispatch_get_main_queue(),
         ^{
             LCExecutePendingSpotifyPlayMediaIntent(delegate);
+            LCExecutePendingUniversalSpotifyDescriptor(delegate);
         }
     );
 }
