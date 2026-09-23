@@ -98,6 +98,18 @@ final class SiriMediaIntentHandler: NSObject, INPlayMediaIntentHandling {
         "com.spotify.client"
     ]
 
+    private static func siriDiag(_ message: String) {
+        let formatter = ISO8601DateFormatter()
+        let line = "[\(formatter.string(from: Date()))] HOST \(message)"
+        var lines = LCUtils.appGroupUserDefault.stringArray(forKey: "LCSiriDiagnosticLog") ?? []
+        lines.append(line)
+        if lines.count > 250 {
+            lines.removeFirst(lines.count - 250)
+        }
+        LCUtils.appGroupUserDefault.set(lines, forKey: "LCSiriDiagnosticLog")
+        NSLog("[LCSiriDiag] %@", message)
+    }
+
     /// SiriKit requires media-item resolution for INPlayMediaIntent.
     /// Without this method Siri accepts the permission/capability registration,
     /// but the request can terminate with a generic "there's a problem" response
@@ -158,10 +170,8 @@ final class SiriMediaIntentHandler: NSObject, INPlayMediaIntentHandling {
             artwork: nil
         )
 
-        NSLog(
-            "[LCSiri] resolveMediaItems: resolved %@ specific=%d",
-            title,
-            descriptor == nil ? 0 : 1
+        Self.siriDiag(
+            "resolve title=\(title) descriptor=\(descriptor.map { String(describing: $0) } ?? "nil") identifierPrefix=\(identifier.prefix(48))"
         )
         completion(INPlayMediaMediaItemResolutionResult.successes(with: [item]))
     }
@@ -175,6 +185,9 @@ final class SiriMediaIntentHandler: NSObject, INPlayMediaIntentHandling {
 
         let hasSpecificRequest = Self.hasSpecificMediaRequest(intent)
         let deepLink = hasSpecificRequest ? nil : "spotify:internal:collection:tracks"
+        Self.siriDiag(
+            "handle specific=\(hasSpecificRequest) mediaSearch=\(String(describing: intent.mediaSearch)) mediaItems=\(String(describing: intent.mediaItems?.map { [$0.title, $0.identifier ?? "nil"] }))"
+        )
 
         if hasSpecificRequest {
             do {
@@ -184,9 +197,9 @@ final class SiriMediaIntentHandler: NSObject, INPlayMediaIntentHandling {
                 )
                 LCUtils.appGroupUserDefault.set(archivedIntent, forKey: "LCSiriPendingPlayMediaIntent")
                 LCUtils.appGroupUserDefault.set(Date(), forKey: "LCSiriPendingPlayMediaDate")
-                NSLog("[LCSiri] Stored specific PlayMedia intent for Spotify native handler")
+                Self.siriDiag("stored pending specific intent bytes=\(archivedIntent.count)")
             } catch {
-                NSLog("[LCSiri] Failed to archive PlayMedia intent: %@", String(describing: error))
+                Self.siriDiag("archive failed error=\(String(describing: error))")
             }
         }
 
@@ -204,7 +217,7 @@ final class SiriMediaIntentHandler: NSObject, INPlayMediaIntentHandling {
             do {
                 try await spotify.runApp(multitask: false, urlStr: deepLink)
             } catch {
-                NSLog("[LCSiri] Failed to launch Spotify guest: %@", String(describing: error))
+                Self.siriDiag("guest launch failed error=\(String(describing: error))")
             }
         }
     }
