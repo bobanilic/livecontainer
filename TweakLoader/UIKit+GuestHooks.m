@@ -17,6 +17,26 @@ BOOL canAppOpenItself(NSURL* url);
 
 #pragma mark - Spotify Siri catalog bridge
 
+static void LCSiriDiag(NSString *format, ...) {
+    va_list args;
+    va_start(args, format);
+    NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
+    va_end(args);
+
+    NSString *line = [NSString stringWithFormat:@"[%@] GUEST %@",
+                      NSISO8601DateFormatter.new.stringFromDate:NSDate.date,
+                      message ?: @""];
+    NSUserDefaults *shared = NSUserDefaults.lcSharedDefaults;
+    NSMutableArray<NSString *> *lines =
+        [[shared stringArrayForKey:@"LCSiriDiagnosticLog"] mutableCopy] ?: [NSMutableArray new];
+    [lines addObject:line];
+    if(lines.count > 250) {
+        [lines removeObjectsInRange:NSMakeRange(0, lines.count - 250)];
+    }
+    [shared setObject:lines forKey:@"LCSiriDiagnosticLog"];
+    NSLog(@"[LCSiriDiag] %@", message);
+}
+
 static NSString *LCSiriCapturedSpotifyBearerToken = nil;
 
 static void LCSiriCaptureSpotifyBearerToken(NSURLSessionTask *task) {
@@ -33,8 +53,8 @@ static void LCSiriCaptureSpotifyBearerToken(NSURLSessionTask *task) {
     @synchronized([NSURLSessionTask class]) {
         LCSiriCapturedSpotifyBearerToken = [token copy];
     }
-    NSLog(@"[LCSiri] Captured Spotify session token for catalog lookup (len=%lu)",
-          (unsigned long)token.length);
+    LCSiriDiag(@"captured Spotify bearer token len=%lu host=%@",
+               (unsigned long)token.length, host);
 }
 
 @interface NSURLSessionTask (LCSiriTokenCapture)
@@ -129,8 +149,8 @@ static NSDictionary *LCSiriSpotifyDescriptorFromIntent(INPlayMediaIntent *intent
         if([descriptor isKindOfClass:NSDictionary.class] &&
            [descriptor[@"q"] isKindOfClass:NSString.class] &&
            [descriptor[@"type"] isKindOfClass:NSString.class]) {
-            NSLog(@"[LCSiri] Recovered preserved Siri query '%@' type=%@",
-                  descriptor[@"q"], descriptor[@"type"]);
+            LCSiriDiag(@"recovered query=%@ type=%@ shuffle=%@",
+                       descriptor[@"q"], descriptor[@"type"], descriptor[@"shuffle"]);
             return descriptor;
         }
 
@@ -146,7 +166,7 @@ static NSDictionary *LCSiriResolveSpotifyCatalogDescriptor(NSDictionary *descrip
 
     NSString *token = LCSiriSpotifyTokenWait(5.0);
     if(!token.length) {
-        NSLog(@"[LCSiri] No captured Spotify bearer token available for specific request");
+        LCSiriDiag(@"catalog lookup: NO captured bearer token");
         return nil;
     }
 
@@ -192,8 +212,8 @@ static NSDictionary *LCSiriResolveSpotifyCatalogDescriptor(NSDictionary *descrip
     }
 
     if(requestError || statusCode != 200 || !responseData.length) {
-        NSLog(@"[LCSiri] Spotify catalog lookup failed status=%ld error=%@",
-              (long)statusCode, requestError);
+        LCSiriDiag(@"catalog lookup failed status=%ld error=%@",
+                   (long)statusCode, requestError);
         return nil;
     }
 
@@ -222,7 +242,8 @@ static NSDictionary *LCSiriResolveSpotifyCatalogDescriptor(NSDictionary *descrip
 
     NSString *uri = item[@"uri"];
     NSString *name = [item[@"name"] isKindOfClass:NSString.class] ? item[@"name"] : query;
-    NSLog(@"[LCSiri] Catalog resolved '%@' -> %@ (%@)", query, name, uri);
+    LCSiriDiag(@"catalog resolved query=%@ type=%@ -> name=%@ uri=%@",
+               query, type, name, uri);
     return @{
         @"uri": uri,
         @"name": name,
@@ -297,6 +318,12 @@ static NSString *LCSiriSpotifyPlayCommand(NSString *uri, NSString *title, BOOL s
         [json base64EncodedStringWithOptions:0]];
 }
 
+static id LCOriginalSpotifyHandlerForIntent(
+    id delegate,
+    UIApplication *application,
+    INIntent *intent
+);
+
 static void LCSiriExecuteResolvedSpotifyURI(
     NSString *uri,
     NSString *title,
@@ -317,7 +344,8 @@ static BOOL LCDeliverURLDirectlyToActiveGuest(NSURL *url) {
         BOOL (*invoke)(id, SEL, UIApplication *, NSURL *, NSDictionary *) =
             (void *)objc_msgSend;
         BOOL handled = invoke(delegate, modernSelector, application, url, @{});
-        NSLog(@"[LCSiri] Direct AppDelegate URL delivery handled=%d url=%@", handled, url);
+        LCSiriDiag(@"direct URL delivery handled=%d scheme=%@ absolutePrefix=%@",
+                   handled, url.scheme, [url.absoluteString substringToIndex:MIN((NSUInteger)80, url.absoluteString.length)]);
         if(handled) return YES;
     }
 
@@ -415,9 +443,12 @@ static void LCSiriExecuteResolvedSpotifyURI(
 ) {
     NSString *identifier = LCSiriSpotifyPlayCommand(uri, title, shuffle);
     if(!identifier.length) {
-        NSLog(@"[LCSiri] Could not build resolved Spotify play-command for %@", uri);
+        LCSiriDiag(@"could not build play-command uri=%@", uri);
         return;
     }
+
+    LCSiriDiag(@"built play-command target=%@ title=%@ shuffle=%d payloadLen=%lu",
+               uri, title, shuffle, (unsigned long)identifier.length);
 
     INMediaItem *item = [[INMediaItem alloc]
         initWithIdentifier:identifier
@@ -435,11 +466,29 @@ static void LCSiriExecuteResolvedSpotifyURI(
         resumePlayback:@NO];
 #pragma clang diagnostic pop
 
-    if(LCTryExecuteSpotifyPlayCommand(intent)) {
-        NSLog(@"[LCSiri] Resolved Spotify catalog item executed: %@", uri);
-    } else {
-        NSLog(@"[LCSiri] Failed to execute resolved Spotify catalog item: %@", uri);
+    id nativeHandler = LCOriginalSpotifyHandlerForIntent(
+        delegate,
+        UIApplication.sharedApplication,
+        intent
+    );
+
+    LCSiriDiag(@"native handler class=%@",
+               nativeHandler ? NSStringFromClass([nativeHandler class]) : @"nil");
+
+    if(nativeHandler &&
+       [nativeHandler respondsToSelector:@selector(handlePlayMedia:completion:)]) {
+        id<INPlayMediaIntentHandling> handler = nativeHandler;
+        [handler handlePlayMedia:intent completion:^(INPlayMediaIntentResponse *response) {
+            LCSiriDiag(@"native handle response code=%ld target=%@",
+                       (long)response.code, uri);
+        }];
+        return;
     }
+
+    // Keep the URL fallback only as a diagnostic last resort; this path is known
+    // to show Spotify's “Couldn't Open Link” alert on some Eevee builds.
+    BOOL direct = LCTryExecuteSpotifyPlayCommand(intent);
+    LCSiriDiag(@"native handler unavailable; URL fallback attempted=%d", direct);
 }
 
 @interface LCSiriGuestMediaIntentHandler : NSObject <INPlayMediaIntentHandling>
@@ -586,9 +635,8 @@ static id LCOriginalSpotifyHandlerForIntent(
         intent
     );
 
-    if(handler) {
-        NSLog(@"[LCSiri] Spotify supplied native intent handler %@", NSStringFromClass([handler class]));
-    }
+    LCSiriDiag(@"original Spotify handler lookup -> %@",
+               handler ? NSStringFromClass([handler class]) : @"nil");
     return handler;
 }
 
