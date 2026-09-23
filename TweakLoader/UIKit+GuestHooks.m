@@ -407,6 +407,41 @@ static BOOL LCTryExecuteSpotifyPlayCommand(INPlayMediaIntent *intent) {
     return NO;
 }
 
+static void LCSiriExecuteResolvedSpotifyURI(
+    NSString *uri,
+    NSString *title,
+    BOOL shuffle,
+    id<UIApplicationDelegate> delegate
+) {
+    NSString *identifier = LCSiriSpotifyPlayCommand(uri, title, shuffle);
+    if(!identifier.length) {
+        NSLog(@"[LCSiri] Could not build resolved Spotify play-command for %@", uri);
+        return;
+    }
+
+    INMediaItem *item = [[INMediaItem alloc]
+        initWithIdentifier:identifier
+        title:title ?: @"Spotify"
+        type:INMediaItemTypeMusic
+        artwork:nil];
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    INPlayMediaIntent *intent = [[INPlayMediaIntent alloc]
+        initWithMediaItems:@[item]
+        mediaContainer:nil
+        playShuffled:@(shuffle)
+        playbackRepeatMode:INPlaybackRepeatModeNone
+        resumePlayback:@NO];
+#pragma clang diagnostic pop
+
+    if(LCTryExecuteSpotifyPlayCommand(intent)) {
+        NSLog(@"[LCSiri] Resolved Spotify catalog item executed: %@", uri);
+    } else {
+        NSLog(@"[LCSiri] Failed to execute resolved Spotify catalog item: %@", uri);
+    }
+}
+
 @interface LCSiriGuestMediaIntentHandler : NSObject <INPlayMediaIntentHandling>
 @property(nonatomic, strong) id<INPlayMediaIntentHandling> nativeHandler;
 + (instancetype)sharedHandler;
