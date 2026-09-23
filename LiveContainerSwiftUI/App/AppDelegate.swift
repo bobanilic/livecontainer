@@ -110,6 +110,53 @@ final class SiriMediaIntentHandler: NSObject, INPlayMediaIntentHandling {
         NSLog("[LCSiriDiag] %@", message)
     }
 
+
+    /// Probe whether Siri preserves an explicitly requested provider name anywhere
+    /// in the archived INPlayMediaIntent. This does not change routing yet.
+    private static func providerProbe(_ intent: INPlayMediaIntent, stage: String) {
+        let knownProviders = [
+            "spotify", "youtube", "youtube music", "yt music", "ytmusic",
+            "deezer", "tidal", "soundcloud", "pandora",
+            "apple music", "amazon music"
+        ]
+
+        var hits: [String] = []
+        if let data = try? NSKeyedArchiver.archivedData(
+            withRootObject: intent,
+            requiringSecureCoding: true
+        ) {
+            let bytes = [UInt8](data)
+            let lowerPatterns = knownProviders.map { ($0, Array($0.utf8)) }
+
+            for (name, pattern) in lowerPatterns where !pattern.isEmpty {
+                if bytes.count >= pattern.count {
+                    outer: for i in 0...(bytes.count - pattern.count) {
+                        for j in 0..<pattern.count {
+                            let b = bytes[i + j]
+                            let normalized: UInt8 = (65...90).contains(b) ? b + 32 : b
+                            if normalized != pattern[j] {
+                                continue outer
+                            }
+                        }
+                        hits.append(name)
+                        break
+                    }
+                }
+            }
+
+            siriDiag(
+                "providerProbe stage=\(stage) archiveBytes=\(data.count) hits=\(hits)"
+            )
+        } else {
+            siriDiag("providerProbe stage=\(stage) archiveFailed")
+        }
+
+        let guests = DataManager.shared.model.apps.map {
+            "\($0.displayName)|\($0.bundleIdentifier)"
+        }.joined(separator: ", ")
+        siriDiag("installedGuests [\(guests)]")
+    }
+
     /// SiriKit requires media-item resolution for INPlayMediaIntent.
     /// Without this method Siri accepts the permission/capability registration,
     /// but the request can terminate with a generic "there's a problem" response
@@ -126,6 +173,7 @@ final class SiriMediaIntentHandler: NSObject, INPlayMediaIntentHandling {
             return
         }
 
+        Self.providerProbe(intent, stage: "resolve")
         let search = intent.mediaSearch
         var titleParts = [
             search?.mediaName,
@@ -177,6 +225,7 @@ final class SiriMediaIntentHandler: NSObject, INPlayMediaIntentHandling {
     }
 
     func handle(intent: INPlayMediaIntent, completion: @escaping (INPlayMediaIntentResponse) -> Void) {
+        Self.providerProbe(intent, stage: "handle")
         guard let spotify = Self.spotifyGuest() else {
             NSLog("[LCSiri] Spotify guest not found")
             completion(INPlayMediaIntentResponse(code: .failure, userActivity: nil))
