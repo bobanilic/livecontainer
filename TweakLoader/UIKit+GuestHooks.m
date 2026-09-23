@@ -4,6 +4,7 @@
 #import "../LiveContainer/utils.h"
 #import <LocalAuthentication/LocalAuthentication.h>
 #import <Intents/Intents.h>
+#import <objc/message.h>
 #import "Localization.h"
 
 UIInterfaceOrientation LCOrientationLock = UIInterfaceOrientationUnknown;
