@@ -45,6 +45,7 @@ static void LCSiriDumpSpotifyIntentRuntime(void) {
         SEL handleSel = NSSelectorFromString(@"handlePlayMedia:completion:");
         SEL resolveSel = NSSelectorFromString(@"resolveMediaItemsForPlayMedia:withCompletion:");
         SEL appIntentSel = @selector(application:handlerForIntent:);
+        SEL legacyHandleSel = @selector(application:handleIntent:completionHandler:);
 
         int count = objc_getClassList(NULL, 0);
         if(count > 0) {
@@ -62,6 +63,7 @@ static void LCSiriDumpSpotifyIntentRuntime(void) {
                 BOOL hasHandle = class_getInstanceMethod(cls, handleSel) != NULL;
                 BOOL hasResolve = class_getInstanceMethod(cls, resolveSel) != NULL;
                 BOOL hasAppIntent = class_getInstanceMethod(cls, appIntentSel) != NULL;
+                BOOL hasLegacyHandle = class_getInstanceMethod(cls, legacyHandleSel) != NULL;
 
                 NSString *lower = name.lowercaseString;
                 BOOL interestingName =
@@ -70,10 +72,10 @@ static void LCSiriDumpSpotifyIntentRuntime(void) {
                     [lower containsString:@"spotify"] ||
                     [lower containsString:@"voice"];
 
-                if(hasHandle || hasResolve || (interestingName && hasAppIntent)) {
+                if(hasHandle || hasResolve || hasLegacyHandle || (interestingName && hasAppIntent)) {
                     [matches addObject:[NSString stringWithFormat:
-                        @"class=%@ handle=%d resolve=%d appHandler=%d",
-                        name, hasHandle, hasResolve, hasAppIntent
+                        @"class=%@ handle=%d resolve=%d appHandler=%d legacyHandle=%d",
+                        name, hasHandle, hasResolve, hasAppIntent, hasLegacyHandle
                     ]];
                 }
             }
@@ -517,6 +519,39 @@ static BOOL LCTryExecuteSpotifyPlayCommand(INPlayMediaIntent *intent) {
     return NO;
 }
 
+static BOOL LCTrySpotifyLegacyDirectIntentHandler(
+    id<UIApplicationDelegate> delegate,
+    INPlayMediaIntent *intent
+) {
+    if(!delegate || !intent) return NO;
+
+    SEL selector = @selector(application:handleIntent:completionHandler:);
+    if(![delegate respondsToSelector:selector]) {
+        LCSiriDiag(@"legacy direct intent handler unavailable on %@",
+                   delegate ? NSStringFromClass([delegate class]) : @"nil");
+        return NO;
+    }
+
+    LCSiriDiag(@"invoking legacy application:handleIntent:completionHandler: on %@",
+               NSStringFromClass([delegate class]));
+
+    void (^completion)(INIntentResponse *) = ^(INIntentResponse *response) {
+        if([response isKindOfClass:INPlayMediaIntentResponse.class]) {
+            INPlayMediaIntentResponse *mediaResponse = (INPlayMediaIntentResponse *)response;
+            LCSiriDiag(@"legacy direct intent response code=%ld",
+                       (long)mediaResponse.code);
+        } else {
+            LCSiriDiag(@"legacy direct intent response class=%@",
+                       response ? NSStringFromClass([response class]) : @"nil");
+        }
+    };
+
+    void (*invoke)(id, SEL, UIApplication *, INIntent *, void (^)(INIntentResponse *)) =
+        (void *)objc_msgSend;
+    invoke(delegate, selector, UIApplication.sharedApplication, intent, completion);
+    return YES;
+}
+
 static void LCSiriExecuteResolvedSpotifyURI(
     NSString *uri,
     NSString *title,
@@ -561,16 +596,25 @@ static void LCSiriExecuteResolvedSpotifyURI(
        [nativeHandler respondsToSelector:@selector(handlePlayMedia:completion:)]) {
         id<INPlayMediaIntentHandling> handler = nativeHandler;
         [handler handlePlayMedia:intent completion:^(INPlayMediaIntentResponse *response) {
-            LCSiriDiag(@"native handle response code=%ld target=%@",
+            LCSiriDiag(@"native handler response code=%ld target=%@",
                        (long)response.code, uri);
         }];
         return;
     }
 
-    // Keep the URL fallback only as a diagnostic last resort; this path is known
-    // to show Spotify's “Couldn't Open Link” alert on some Eevee builds.
-    BOOL direct = LCTryExecuteSpotifyPlayCommand(intent);
-    LCSiriDiag(@"native handler unavailable; URL fallback attempted=%d", direct);
+    // Spotify may still use the older app-delegate Siri path. Apple invokes
+    // application:handleIntent:completionHandler: after the Intents extension
+    // resolves a media request and asks the containing app to perform playback.
+    // A spotify:play-command identifier belongs inside that INPlayMediaIntent;
+    // it is not necessarily a URL that the Spotify UI router can open.
+    if(LCTrySpotifyLegacyDirectIntentHandler(delegate, intent)) {
+        LCSiriDiag(@"resolved target handed to Spotify legacy direct intent handler");
+        return;
+    }
+
+    // Do not feed spotify:play-command into openURL here. Diagnostics proved the
+    // URL router accepts the call but then presents “Couldn't Open Link”.
+    LCSiriDiag(@"no Spotify intent execution path available for target=%@", uri);
 }
 
 @interface LCSiriGuestMediaIntentHandler : NSObject <INPlayMediaIntentHandling>
@@ -866,8 +910,12 @@ static void LCInstallGuestIntentHandlerIfNeeded(id<UIApplicationDelegate> delega
     }
 
     LCHookedGuestDelegateClass = cls;
-    LCSiriDiag(@"installed Siri bridge delegateClass=%@ originalAppIntentIMP=%d",
-               NSStringFromClass(cls), LCOriginalGuestIntentHandlerIMP != NULL);
+    BOOL legacyDirect =
+        [delegate respondsToSelector:@selector(application:handleIntent:completionHandler:)];
+    LCSiriDiag(@"installed Siri bridge delegateClass=%@ originalAppIntentIMP=%d legacyDirect=%d",
+               NSStringFromClass(cls),
+               LCOriginalGuestIntentHandlerIMP != NULL,
+               legacyDirect);
 
     dispatch_after(
         dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
