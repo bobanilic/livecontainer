@@ -1,0 +1,52 @@
+name: Siri Media Router POC
+
+on:
+  push:
+    branches:
+      - feature/siri-media-router
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Siri media router IPA
+    runs-on: macos-latest
+    env:
+      scheme: LiveContainer
+      archive_path: archive
+    steps:
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '26.2'
+
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Archive
+        run: |
+          set -o pipefail
+          xcodebuild archive \
+            -archivePath "$archive_path" \
+            -scheme "$scheme" \
+            -project LiveContainer.xcodeproj \
+            -sdk iphoneos \
+            -arch arm64 \
+            -configuration Release | xcpretty
+
+      - name: Create IPA
+        run: sh .github/build_github.sh
+
+      - name: Verify Siri metadata
+        run: |
+          /usr/libexec/PlistBuddy -c "Print :INIntentsSupported" Payload/LiveContainer.app/Info.plist
+          codesign -d --entitlements :- Payload/LiveContainer.app 2>/tmp/lc-entitlements.plist || true
+          cat /tmp/lc-entitlements.plist || true
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v7
+        with:
+          name: LiveContainer-Siri-Media-Router
+          path: |
+            LiveContainer.ipa
+            LiveContainer+SideStore.ipa
