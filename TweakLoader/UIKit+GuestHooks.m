@@ -159,18 +159,96 @@ static NSString *LCSpotifyGenreSlug(NSString *genre) {
 static IMP LCOriginalGuestIntentHandlerIMP = NULL;
 static Class LCHookedGuestDelegateClass = Nil;
 
+static id LCOriginalSpotifyHandlerForIntent(
+    id delegate,
+    UIApplication *application,
+    INIntent *intent
+) {
+    if(!LCOriginalGuestIntentHandlerIMP) {
+        return nil;
+    }
+
+    id (*original)(id, SEL, UIApplication *, INIntent *) = (void *)LCOriginalGuestIntentHandlerIMP;
+    id handler = original(
+        delegate,
+        @selector(application:handlerForIntent:),
+        application,
+        intent
+    );
+
+    if(handler) {
+        NSLog(@"[LCSiri] Spotify supplied native intent handler %@", NSStringFromClass([handler class]));
+    }
+    return handler;
+}
+
+static void LCExecutePendingSpotifyPlayMediaIntent(id<UIApplicationDelegate> delegate) {
+    NSUserDefaults *shared = NSUserDefaults.lcSharedDefaults;
+    NSData *data = [shared dataForKey:@"LCSiriPendingPlayMediaIntent"];
+    NSDate *date = [shared objectForKey:@"LCSiriPendingPlayMediaDate"];
+
+    if(!data) {
+        return;
+    }
+
+    // Consume once. A stale request should never unexpectedly start playback.
+    [shared removeObjectForKey:@"LCSiriPendingPlayMediaIntent"];
+    [shared removeObjectForKey:@"LCSiriPendingPlayMediaDate"];
+
+    if(date && fabs(date.timeIntervalSinceNow) > 30.0) {
+        NSLog(@"[LCSiri] Ignoring stale pending PlayMedia intent");
+        return;
+    }
+
+    NSError *error = nil;
+    INPlayMediaIntent *intent =
+        [NSKeyedUnarchiver unarchivedObjectOfClass:INPlayMediaIntent.class
+                                          fromData:data
+                                             error:&error];
+    if(!intent || error) {
+        NSLog(@"[LCSiri] Failed to decode pending PlayMedia intent: %@", error);
+        return;
+    }
+
+    id nativeHandler = LCOriginalSpotifyHandlerForIntent(
+        delegate,
+        UIApplication.sharedApplication,
+        intent
+    );
+
+    if(nativeHandler && [nativeHandler respondsToSelector:@selector(handlePlayMedia:completion:)]) {
+        NSLog(@"[LCSiri] Forwarding cold-start request to Spotify native Siri handler");
+        id<INPlayMediaIntentHandling> mediaHandler = nativeHandler;
+        [mediaHandler handlePlayMedia:intent completion:^(INPlayMediaIntentResponse *response) {
+            NSLog(@"[LCSiri] Spotify native pending response code=%ld", (long)response.code);
+        }];
+        return;
+    }
+
+    NSLog(@"[LCSiri] Spotify native Siri handler unavailable; using LiveContainer fallback");
+    [[LCSiriGuestMediaIntentHandler sharedHandler]
+        handlePlayMedia:intent
+        completion:^(INPlayMediaIntentResponse *response) {
+            NSLog(@"[LCSiri] Fallback pending response code=%ld", (long)response.code);
+        }];
+}
+
 static id LCGuestApplicationHandlerForIntent(id self, SEL _cmd, UIApplication *application, INIntent *intent) {
     NSURL *spotifyProbe = [NSURL URLWithString:@"spotify:"];
     if([intent isKindOfClass:INPlayMediaIntent.class] && spotifyProbe && canAppOpenItself(spotifyProbe)) {
-        NSLog(@"[LCSiri] Handling PlayMedia inside active Spotify guest");
+        // Prefer Spotify's own Siri implementation. It already knows how to resolve
+        // artist, track, album, genre, mood, recommendations, and account context.
+        id nativeHandler = LCOriginalSpotifyHandlerForIntent(self, application, intent);
+        if(nativeHandler) {
+            NSLog(@"[LCSiri] Passing PlayMedia to Spotify native Siri handler");
+            return nativeHandler;
+        }
+
+        NSLog(@"[LCSiri] Spotify native Siri handler unavailable; using LC fallback");
         return [LCSiriGuestMediaIntentHandler sharedHandler];
     }
 
-    if(LCOriginalGuestIntentHandlerIMP) {
-        id (*original)(id, SEL, UIApplication *, INIntent *) = (void *)LCOriginalGuestIntentHandlerIMP;
-        return original(self, _cmd, application, intent);
-    }
-    return nil;
+    return LCOriginalSpotifyHandlerForIntent(self, application, intent);
 }
 
 static void LCInstallGuestIntentHandlerIfNeeded(id<UIApplicationDelegate> delegate) {
@@ -197,6 +275,14 @@ static void LCInstallGuestIntentHandlerIfNeeded(id<UIApplicationDelegate> delega
 
     LCHookedGuestDelegateClass = cls;
     NSLog(@"[LCSiri] Installed warm-state Siri bridge on %@", NSStringFromClass(cls));
+
+    dispatch_after(
+        dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.75 * NSEC_PER_SEC)),
+        dispatch_get_main_queue(),
+        ^{
+            LCExecutePendingSpotifyPlayMediaIntent(delegate);
+        }
+    );
 }
 
 __attribute__((constructor))
