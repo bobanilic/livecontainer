@@ -5,6 +5,7 @@
 #import <LocalAuthentication/LocalAuthentication.h>
 #import <Intents/Intents.h>
 #import <objc/message.h>
+#import <objc/runtime.h>
 #import "Localization.h"
 
 UIInterfaceOrientation LCOrientationLock = UIInterfaceOrientationUnknown;
@@ -38,6 +39,82 @@ static void LCSiriDiag(NSString *format, ...) {
     NSLog(@"[LCSiriDiag] %@", message);
 }
 
+static void LCSiriDumpSpotifyIntentRuntime(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        SEL handleSel = NSSelectorFromString(@"handlePlayMedia:completion:");
+        SEL resolveSel = NSSelectorFromString(@"resolveMediaItemsForPlayMedia:withCompletion:");
+        SEL appIntentSel = @selector(application:handlerForIntent:);
+
+        int count = objc_getClassList(NULL, 0);
+        if(count > 0) {
+            Class *classes = (__unsafe_unretained Class *)calloc((size_t)count, sizeof(Class));
+            count = objc_getClassList(classes, count);
+            NSMutableArray<NSString *> *matches = [NSMutableArray new];
+
+            for(int i = 0; i < count; i++) {
+                Class cls = classes[i];
+                const char *raw = class_getName(cls);
+                if(!raw) continue;
+                NSString *name = [NSString stringWithUTF8String:raw];
+                if(!name.length) continue;
+
+                BOOL hasHandle = class_getInstanceMethod(cls, handleSel) != NULL;
+                BOOL hasResolve = class_getInstanceMethod(cls, resolveSel) != NULL;
+                BOOL hasAppIntent = class_getInstanceMethod(cls, appIntentSel) != NULL;
+
+                NSString *lower = name.lowercaseString;
+                BOOL interestingName =
+                    [lower containsString:@"siri"] ||
+                    [lower containsString:@"intent"] ||
+                    [lower containsString:@"spotify"] ||
+                    [lower containsString:@"voice"];
+
+                if(hasHandle || hasResolve || (interestingName && hasAppIntent)) {
+                    [matches addObject:[NSString stringWithFormat:
+                        @"class=%@ handle=%d resolve=%d appHandler=%d",
+                        name, hasHandle, hasResolve, hasAppIntent
+                    ]];
+                }
+            }
+            free(classes);
+
+            LCSiriDiag(@"runtime intent candidates count=%lu",
+                       (unsigned long)matches.count);
+            for(NSString *line in matches) {
+                LCSiriDiag(@"runtime %@", line);
+            }
+        }
+
+        NSFileManager *fm = NSFileManager.defaultManager;
+        NSURL *bundleURL = NSBundle.mainBundle.bundleURL;
+        NSURL *pluginsURL = [bundleURL URLByAppendingPathComponent:@"PlugIns" isDirectory:YES];
+        NSArray<NSURL *> *pluginURLs =
+            [fm contentsOfDirectoryAtURL:pluginsURL
+              includingPropertiesForKeys:nil
+                                 options:0
+                                   error:nil] ?: @[];
+
+        LCSiriDiag(@"bundle=%@ plugins=%lu",
+                   bundleURL.path, (unsigned long)pluginURLs.count);
+
+        for(NSURL *url in pluginURLs) {
+            if(![[url.pathExtension lowercaseString] isEqualToString:@"appex"]) continue;
+            NSBundle *bundle = [NSBundle bundleWithURL:url];
+            NSDictionary *info = bundle.infoDictionary ?: @{};
+            NSDictionary *ext = info[@"NSExtension"];
+            LCSiriDiag(
+                @"appex name=%@ id=%@ point=%@ principal=%@ executable=%@",
+                url.lastPathComponent,
+                info[@"CFBundleIdentifier"] ?: @"nil",
+                [ext isKindOfClass:NSDictionary.class] ? ext[@"NSExtensionPointIdentifier"] : @"nil",
+                [ext isKindOfClass:NSDictionary.class] ? ext[@"NSExtensionPrincipalClass"] : @"nil",
+                info[@"CFBundleExecutable"] ?: @"nil"
+            );
+        }
+    });
+}
+
 static NSString *LCSiriCapturedSpotifyBearerToken = nil;
 
 static void LCSiriCaptureSpotifyBearerToken(NSURLSessionTask *task) {
@@ -51,11 +128,15 @@ static void LCSiriCaptureSpotifyBearerToken(NSURLSessionTask *task) {
     NSString *token = [auth substringFromIndex:7];
     if(token.length < 20) return;
 
+    BOOL changed = NO;
     @synchronized([NSURLSessionTask class]) {
+        changed = ![LCSiriCapturedSpotifyBearerToken isEqualToString:token];
         LCSiriCapturedSpotifyBearerToken = [token copy];
     }
-    LCSiriDiag(@"captured Spotify bearer token len=%lu host=%@",
-               (unsigned long)token.length, host);
+    if(changed) {
+        LCSiriDiag(@"captured NEW Spotify bearer token len=%lu host=%@",
+                   (unsigned long)token.length, host);
+    }
 }
 
 @interface NSURLSessionTask (LCSiriTokenCapture)
@@ -785,7 +866,16 @@ static void LCInstallGuestIntentHandlerIfNeeded(id<UIApplicationDelegate> delega
     }
 
     LCHookedGuestDelegateClass = cls;
-    NSLog(@"[LCSiri] Installed warm-state Siri bridge on %@", NSStringFromClass(cls));
+    LCSiriDiag(@"installed Siri bridge delegateClass=%@ originalAppIntentIMP=%d",
+               NSStringFromClass(cls), LCOriginalGuestIntentHandlerIMP != NULL);
+
+    dispatch_after(
+        dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+        dispatch_get_main_queue(),
+        ^{
+            LCSiriDumpSpotifyIntentRuntime();
+        }
+    );
 
     dispatch_after(
         dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.75 * NSEC_PER_SEC)),
