@@ -108,14 +108,14 @@ static void LCInstallGuestIntentHandlerIfNeeded(id<UIApplicationDelegate> delega
 
     Class cls = object_getClass(delegate);
     SEL selector = @selector(application:handlerForIntent:);
-    Method method = class_getInstanceMethod(cls, selector);
+    Method visibleMethod = class_getInstanceMethod(cls, selector);
+    LCOriginalGuestIntentHandlerIMP = visibleMethod ? method_getImplementation(visibleMethod) : NULL;
+    const char *types = visibleMethod ? method_getTypeEncoding(visibleMethod) : "@@:@@";
 
-    if(method) {
-        LCOriginalGuestIntentHandlerIMP = method_getImplementation(method);
-        method_setImplementation(method, (IMP)LCGuestApplicationHandlerForIntent);
-    } else {
-        class_addMethod(cls, selector, (IMP)LCGuestApplicationHandlerForIntent, "@@:@@");
-        LCOriginalGuestIntentHandlerIMP = NULL;
+    // Add an override on the concrete guest delegate class first. This avoids
+    // mutating a superclass implementation that other UIKit/guest classes may share.
+    if(!class_addMethod(cls, selector, (IMP)LCGuestApplicationHandlerForIntent, types)) {
+        class_replaceMethod(cls, selector, (IMP)LCGuestApplicationHandlerForIntent, types);
     }
 
     LCHookedGuestDelegateClass = cls;
