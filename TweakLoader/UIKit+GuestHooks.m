@@ -52,6 +52,19 @@ static BOOL LCDeliverURLDirectlyToActiveGuest(NSURL *url) {
 }
 
 
+static NSString *LCSpotifyGenreSlug(NSString *genre) {
+    NSString *trimmed = [[genre stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] lowercaseString];
+    NSArray<NSString *> *parts = [trimmed componentsSeparatedByCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    NSMutableArray<NSString *> *nonEmpty = [NSMutableArray new];
+    for(NSString *part in parts) {
+        if(part.length) [nonEmpty addObject:part];
+    }
+    NSString *collapsed = [nonEmpty componentsJoinedByString:@"-"];
+    NSMutableCharacterSet *allowed = [NSCharacterSet.alphanumericCharacterSet mutableCopy];
+    [allowed addCharactersInString:@"-_"];
+    return [collapsed stringByAddingPercentEncodingWithAllowedCharacters:allowed] ?: collapsed;
+}
+
 @interface LCSiriGuestMediaIntentHandler : NSObject <INPlayMediaIntentHandling>
 + (instancetype)sharedHandler;
 @end
@@ -72,6 +85,12 @@ static BOOL LCDeliverURLDirectlyToActiveGuest(NSURL *url) {
     NSString *title = intent.mediaSearch.mediaName;
     if(title.length == 0) title = intent.mediaSearch.artistName;
     if(title.length == 0) title = intent.mediaSearch.albumName;
+    if(title.length == 0) title = intent.mediaSearch.genreNames.firstObject;
+    if(title.length == 0) title = intent.mediaSearch.moodNames.firstObject;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    if(title.length == 0) title = intent.mediaSearch.activityNames.firstObject;
+#pragma clang diagnostic pop
     if(title.length == 0) title = @"Spotify";
 
     INMediaItemType mediaType = intent.mediaSearch.mediaType;
@@ -90,16 +109,30 @@ static BOOL LCDeliverURLDirectlyToActiveGuest(NSURL *url) {
              completion:(void (^)(INPlayMediaIntentResponse *))completion {
     NSString *uri = @"spotify:internal:collection:tracks";
 
-    NSMutableArray<NSString *> *terms = [NSMutableArray new];
-    if(intent.mediaSearch.mediaName.length) [terms addObject:intent.mediaSearch.mediaName];
-    if(intent.mediaSearch.artistName.length) [terms addObject:intent.mediaSearch.artistName];
-    if(intent.mediaSearch.albumName.length) [terms addObject:intent.mediaSearch.albumName];
+    INMediaSearch *search = intent.mediaSearch;
+    NSString *genre = search.genreNames.firstObject;
+    if(genre.length > 0) {
+        NSString *slug = LCSpotifyGenreSlug(genre);
+        uri = [@"spotify:radio:genre:" stringByAppendingString:slug];
+        NSLog(@"[LCSiri] Genre request %@ -> %@", genre, uri);
+    } else {
+        NSMutableArray<NSString *> *terms = [NSMutableArray new];
+        if(search.mediaName.length) [terms addObject:search.mediaName];
+        if(search.artistName.length) [terms addObject:search.artistName];
+        if(search.albumName.length) [terms addObject:search.albumName];
+        if(search.moodNames.count) [terms addObjectsFromArray:search.moodNames];
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        if(search.activityNames.count) [terms addObjectsFromArray:search.activityNames];
+#pragma clang diagnostic pop
 
-    if(terms.count > 0) {
-        NSString *query = [terms componentsJoinedByString:@" "];
-        NSCharacterSet *allowed = [[NSCharacterSet URLQueryAllowedCharacterSet] mutableCopy];
-        NSString *encoded = [query stringByAddingPercentEncodingWithAllowedCharacters:allowed] ?: query;
-        uri = [@"spotify:search:" stringByAppendingString:encoded];
+        if(terms.count > 0) {
+            NSString *query = [terms componentsJoinedByString:@" "];
+            NSMutableCharacterSet *allowed = [NSCharacterSet.URLQueryAllowedCharacterSet mutableCopy];
+            [allowed removeCharactersInString:@"&?=#"];
+            NSString *encoded = [query stringByAddingPercentEncodingWithAllowedCharacters:allowed] ?: query;
+            uri = [@"spotify:search:" stringByAppendingString:encoded];
+        }
     }
 
     NSLog(@"[LCSiri] Guest bridge routing PlayMedia to %@", uri);
