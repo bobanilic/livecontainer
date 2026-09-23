@@ -113,8 +113,35 @@ static NSDictionary *LCSiriSpotifySearchDescriptor(INMediaSearch *search) {
     return nil;
 }
 
-static NSDictionary *LCSiriResolveSpotifyCatalog(INMediaSearch *search) {
-    NSDictionary *descriptor = LCSiriSpotifySearchDescriptor(search);
+static NSDictionary *LCSiriSpotifyDescriptorFromIntent(INPlayMediaIntent *intent) {
+    for(INMediaItem *item in intent.mediaItems ?: @[]) {
+        NSString *identifier = item.identifier ?: @"";
+        NSString *prefix = @"livecontainer.spotify.query:";
+        if(![identifier hasPrefix:prefix]) continue;
+
+        NSString *encoded = [identifier substringFromIndex:prefix.length];
+        NSData *data = [[NSData alloc] initWithBase64EncodedString:encoded options:0];
+        if(!data.length) continue;
+
+        NSError *error = nil;
+        NSDictionary *descriptor =
+            [NSJSONSerialization JSONObjectWithData:data options:0 error:&error];
+        if([descriptor isKindOfClass:NSDictionary.class] &&
+           [descriptor[@"q"] isKindOfClass:NSString.class] &&
+           [descriptor[@"type"] isKindOfClass:NSString.class]) {
+            NSLog(@"[LCSiri] Recovered preserved Siri query '%@' type=%@",
+                  descriptor[@"q"], descriptor[@"type"]);
+            return descriptor;
+        }
+
+        NSLog(@"[LCSiri] Failed to decode preserved Siri query: %@", error);
+    }
+
+    return LCSiriSpotifySearchDescriptor(intent.mediaSearch);
+}
+
+
+static NSDictionary *LCSiriResolveSpotifyCatalogDescriptor(NSDictionary *descriptor) {
     if(!descriptor) return nil;
 
     NSString *token = LCSiriSpotifyTokenWait(5.0);
@@ -202,6 +229,12 @@ static NSDictionary *LCSiriResolveSpotifyCatalog(INMediaSearch *search) {
         @"type": type,
         @"shuffle": descriptor[@"shuffle"] ?: @NO
     };
+}
+
+static NSDictionary *LCSiriResolveSpotifyCatalog(INPlayMediaIntent *intent) {
+    return LCSiriResolveSpotifyCatalogDescriptor(
+        LCSiriSpotifyDescriptorFromIntent(intent)
+    );
 }
 
 static NSString *LCSiriSpotifyPlayCommand(NSString *uri, NSString *title, BOOL shuffle) {
@@ -304,22 +337,7 @@ static BOOL LCDeliverURLDirectlyToActiveGuest(NSURL *url) {
 }
 
 static BOOL LCHasSpecificMediaRequest(INPlayMediaIntent *intent) {
-    INMediaSearch *search = intent.mediaSearch;
-    if(!search) return NO;
-
-    if(search.mediaName.length || search.artistName.length || search.albumName.length) {
-        return YES;
-    }
-    if(search.genreNames.count || search.moodNames.count) {
-        return YES;
-    }
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    if(search.activityNames.count) {
-        return YES;
-    }
-#pragma clang diagnostic pop
-    return NO;
+    return LCSiriSpotifyDescriptorFromIntent(intent) != nil;
 }
 
 // INIntentResolutionResult has a private resolvedValue accessor used internally by
@@ -446,6 +464,32 @@ static BOOL LCTryExecuteSpotifyPlayCommand(INPlayMediaIntent *intent) {
 
 - (void)handlePlayMedia:(INPlayMediaIntent *)intent
              completion:(void (^)(INPlayMediaIntentResponse *))completion {
+    NSDictionary *preservedDescriptor = LCSiriSpotifyDescriptorFromIntent(intent);
+    if(preservedDescriptor) {
+        completion([[INPlayMediaIntentResponse alloc]
+            initWithCode:INPlayMediaIntentResponseCodeSuccess
+            userActivity:nil]);
+
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            NSDictionary *resolved =
+                LCSiriResolveSpotifyCatalogDescriptor(preservedDescriptor);
+            if(!resolved) {
+                NSLog(@"[LCSiri] Preserved Siri query could not be resolved");
+                return;
+            }
+
+            dispatch_async(dispatch_get_main_queue(), ^{
+                LCSiriExecuteResolvedSpotifyURI(
+                    resolved[@"uri"],
+                    resolved[@"name"],
+                    [resolved[@"shuffle"] boolValue],
+                    UIApplication.sharedApplication.delegate
+                );
+            });
+        });
+        return;
+    }
+
     // After Siri's resolution pass, Spotify's resolved INMediaItem normally carries
     // a spotify:play-command:<payload> identifier. Execute that command directly so
     // the guest does not depend on iOS believing native Spotify is installed.
@@ -537,6 +581,29 @@ static void LCExecutePendingSpotifyPlayMediaIntent(id<UIApplicationDelegate> del
                                              error:&error];
     if(!intent || error) {
         NSLog(@"[LCSiri] Failed to decode pending PlayMedia intent: %@", error);
+        return;
+    }
+
+    NSDictionary *preservedDescriptor = LCSiriSpotifyDescriptorFromIntent(intent);
+    if(preservedDescriptor) {
+        NSLog(@"[LCSiri] Cold start: resolving preserved Siri query through Spotify catalog");
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            NSDictionary *resolved =
+                LCSiriResolveSpotifyCatalogDescriptor(preservedDescriptor);
+            if(!resolved) {
+                NSLog(@"[LCSiri] Cold start: preserved Siri query resolution failed");
+                return;
+            }
+
+            dispatch_async(dispatch_get_main_queue(), ^{
+                LCSiriExecuteResolvedSpotifyURI(
+                    resolved[@"uri"],
+                    resolved[@"name"],
+                    [resolved[@"shuffle"] boolValue],
+                    delegate
+                );
+            });
+        });
         return;
     }
 
