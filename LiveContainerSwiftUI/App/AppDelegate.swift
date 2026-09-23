@@ -43,6 +43,7 @@ import Intents
     func application(_ application: UIApplication, handlerFor intent: INIntent) -> Any? {
         switch intent {
         case is ViewAppIntent: return ViewAppIntentHandler()
+        case is INPlayMediaIntent: return SiriMediaIntentHandler()
         default:
             return nil
         }
@@ -82,5 +83,80 @@ public class ViewAppIntentHandler: NSObject, ViewAppIntentHandling
     public func provideAppOptionsCollection(for intent: ViewAppIntent, with completion: @escaping (INObjectCollection<App>?, Error?) -> Void)
     {
         completion(INObjectCollection(items:[]), nil)
+    }
+}
+
+
+/// Proof-of-concept Siri media router.
+///
+/// iOS sees LiveContainer as the media-capable host. The first experiment routes a
+/// generic Siri music request to a Spotify guest installed in LiveContainer.
+/// Provider aliases and additional guest adapters are deliberately left for the
+/// next phase, after verifying that SiriKit registration survives sideload signing.
+final class SiriMediaIntentHandler: NSObject, INPlayMediaIntentHandling {
+    private static let spotifyBundleIdentifiers: Set<String> = [
+        "com.spotify.client"
+    ]
+
+    func handle(intent: INPlayMediaIntent, completion: @escaping (INPlayMediaIntentResponse) -> Void) {
+        guard let spotify = Self.spotifyGuest() else {
+            NSLog("[LCSiri] Spotify guest not found")
+            completion(INPlayMediaIntentResponse(code: .failure, userActivity: nil))
+            return
+        }
+
+        let deepLink = Self.spotifyDeepLink(for: intent)
+        NSLog("[LCSiri] Routing PlayMedia intent to %@ with URL %@", spotify.displayName, deepLink)
+
+        // Report acceptance before switching the host process into the guest.
+        // LiveContainer's normal non-multitask launch path restarts/kills the host,
+        // so waiting for runApp() to return could prevent Siri from receiving a response.
+        completion(INPlayMediaIntentResponse(code: .success, userActivity: nil))
+
+        Task { @MainActor in
+            do {
+                try await spotify.runApp(multitask: false, urlStr: deepLink)
+            } catch {
+                NSLog("[LCSiri] Failed to launch Spotify guest: %@", String(describing: error))
+            }
+        }
+    }
+
+    private static func spotifyGuest() -> LCAppModel? {
+        let apps = DataManager.shared.model.apps
+        return apps.first {
+            spotifyBundleIdentifiers.contains($0.bundleIdentifier.lowercased())
+        } ?? apps.first {
+            $0.displayName.localizedCaseInsensitiveContains("spotify")
+        }
+    }
+
+    private static func spotifyDeepLink(for intent: INPlayMediaIntent) -> String {
+        if let search = intent.mediaSearch {
+            let terms: [String] = [
+                search.mediaName,
+                search.artistName,
+                search.albumName
+            ].compactMap { value in
+                guard let value, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    return nil
+                }
+                return value
+            }
+
+            let descriptiveTerms = terms
+                + (search.genreNames ?? [])
+                + (search.moodNames ?? [])
+
+            if !descriptiveTerms.isEmpty {
+                let query = descriptiveTerms.joined(separator: " ")
+                let allowed = CharacterSet.urlQueryAllowed.subtracting(CharacterSet(charactersIn: "&?=#"))
+                let encoded = query.addingPercentEncoding(withAllowedCharacters: allowed) ?? query
+                return "spotify:search:\(encoded)"
+            }
+        }
+
+        // Generic requests such as "play some music" land on the user's library.
+        return "spotify:collection:tracks"
     }
 }
