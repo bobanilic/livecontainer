@@ -32,7 +32,7 @@ jobs:
             -project LiveContainer.xcodeproj \
             -sdk iphoneos \
             -arch arm64 \
-            -configuration Release | xcpretty
+            -configuration Release
 
       - name: Create IPA
         run: sh .github/build_github.sh
