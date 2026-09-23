@@ -23,8 +23,9 @@ static void LCSiriDiag(NSString *format, ...) {
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
 
+    NSISO8601DateFormatter *formatter = [NSISO8601DateFormatter new];
     NSString *line = [NSString stringWithFormat:@"[%@] GUEST %@",
-                      NSISO8601DateFormatter.new.stringFromDate:NSDate.date,
+                      [formatter stringFromDate:[NSDate date]],
                       message ?: @""];
     NSUserDefaults *shared = NSUserDefaults.lcSharedDefaults;
     NSMutableArray<NSString *> *lines =
