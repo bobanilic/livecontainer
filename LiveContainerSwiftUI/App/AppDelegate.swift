@@ -115,7 +115,7 @@ final class SiriMediaIntentHandler: NSObject, INPlayMediaIntentHandling {
         }
 
         let search = intent.mediaSearch
-        let requestedTitle = [
+        var titleParts = [
             search?.mediaName,
             search?.artistName,
             search?.albumName
@@ -126,7 +126,10 @@ final class SiriMediaIntentHandler: NSObject, INPlayMediaIntentHandling {
             }
             return value
         }
-        .joined(separator: " ")
+        titleParts.append(contentsOf: search?.genreNames ?? [])
+        titleParts.append(contentsOf: search?.moodNames ?? [])
+        titleParts.append(contentsOf: search?.activityNames ?? [])
+        let requestedTitle = titleParts.joined(separator: " ")
 
         let title = requestedTitle.isEmpty ? "Spotify" : requestedTitle
         let mediaType: INMediaItemType = {
@@ -181,31 +184,53 @@ final class SiriMediaIntentHandler: NSObject, INPlayMediaIntentHandling {
     }
 
     private static func spotifyDeepLink(for intent: INPlayMediaIntent) -> String {
-        if let search = intent.mediaSearch {
-            let terms: [String] = [
-                search.mediaName,
-                search.artistName,
-                search.albumName
-            ].compactMap { value in
-                guard let value, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                    return nil
-                }
-                return value
-            }
-
-            let descriptiveTerms = terms
-                + (search.genreNames ?? [])
-                + (search.moodNames ?? [])
-
-            if !descriptiveTerms.isEmpty {
-                let query = descriptiveTerms.joined(separator: " ")
-                let allowed = CharacterSet.urlQueryAllowed.subtracting(CharacterSet(charactersIn: "&?=#"))
-                let encoded = query.addingPercentEncoding(withAllowedCharacters: allowed) ?? query
-                return "spotify:search:\(encoded)"
-            }
+        guard let search = intent.mediaSearch else {
+            return "spotify:internal:collection:tracks"
         }
 
-        // Generic requests such as "play some music" land on the user's library.
+        // Siri puts requests such as “play some jazz music” in genreNames rather
+        // than mediaName. A normal spotify:search: URI only opens search results;
+        // Spotify's genre-radio URI is a better playback context for genre requests.
+        if let genre = search.genreNames?.first(where: {
+            !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }) {
+            let slug = spotifyGenreSlug(genre)
+            NSLog("[LCSiri] Genre request %@ -> spotify:radio:genre:%@", genre, slug)
+            return "spotify:radio:genre:\(slug)"
+        }
+
+        var descriptiveTerms: [String] = [
+            search.mediaName,
+            search.artistName,
+            search.albumName
+        ].compactMap { value in
+            guard let value, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return nil
+            }
+            return value
+        }
+        descriptiveTerms.append(contentsOf: search.moodNames ?? [])
+        descriptiveTerms.append(contentsOf: search.activityNames ?? [])
+
+        if !descriptiveTerms.isEmpty {
+            let query = descriptiveTerms.joined(separator: " ")
+            let allowed = CharacterSet.urlQueryAllowed.subtracting(CharacterSet(charactersIn: "&?=#"))
+            let encoded = query.addingPercentEncoding(withAllowedCharacters: allowed) ?? query
+            return "spotify:search:\(encoded)"
+        }
+
+        // Generic requests such as “play some music” use the user's Liked Songs.
         return "spotify:internal:collection:tracks"
+    }
+
+    private static func spotifyGenreSlug(_ genre: String) -> String {
+        let trimmed = genre.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let collapsed = trimmed.replacingOccurrences(
+            of: #"\s+"#,
+            with: "-",
+            options: .regularExpression
+        )
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
+        return collapsed.addingPercentEncoding(withAllowedCharacters: allowed) ?? collapsed
     }
 }
