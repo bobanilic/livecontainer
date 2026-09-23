@@ -206,6 +206,6 @@ final class SiriMediaIntentHandler: NSObject, INPlayMediaIntentHandling {
         }
 
         // Generic requests such as "play some music" land on the user's library.
-        return "spotify:collection:tracks"
+        return "spotify:internal:collection:tracks"
     }
 }
