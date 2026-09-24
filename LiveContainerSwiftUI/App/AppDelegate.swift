@@ -410,7 +410,6 @@ final class SiriMediaIntentHandler: NSObject, INPlayMediaIntentHandling {
     }}
 
 
-@available(iOS 16.0, *)
 enum LCUniversalMediaProvider: String {
     case spotify
     case youtube
@@ -449,8 +448,6 @@ enum LCUniversalMediaProvider: String {
     }
 }
 
-@available(iOS 16.0, *)
-@MainActor
 enum LCUniversalMediaRouter {
     static let selectedProviderKey = "LCUniversalSelectedMediaProvider"
 
@@ -516,6 +513,7 @@ enum LCUniversalMediaRouter {
         "r&b", "soul", "funk", "ambient", "edm", "dance"
     ]
 
+    @MainActor
     static func route(provider: LCUniversalMediaProvider, query: String?) async throws {
         let normalizedQuery = query?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -565,6 +563,7 @@ enum LCUniversalMediaRouter {
         }
     }
 
+    @MainActor
     private static func routeSpotify(guest: LCAppModel, query: String?) async throws {
         guard let query, !query.isEmpty else {
             try await guest.runApp(
@@ -589,6 +588,7 @@ enum LCUniversalMediaRouter {
         try await guest.runApp(multitask: false, urlStr: nil)
     }
 
+    @MainActor
     private static func routeYouTube(
         guest: LCAppModel,
         query: String?,
@@ -681,6 +681,7 @@ enum LCUniversalMediaRouter {
         }
     }
 
+    @MainActor
     private static func findGuest(_ provider: LCUniversalMediaProvider) -> LCAppModel? {
         let allApps = DataManager.shared.model.apps + DataManager.shared.model.hiddenApps
         if let exact = allApps.first(where: {
