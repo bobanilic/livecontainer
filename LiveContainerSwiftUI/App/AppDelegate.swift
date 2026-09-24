@@ -1018,23 +1018,5 @@ struct LCUniversalMediaShortcuts: AppShortcutsProvider {
             shortTitle: "YouTube Music Something",
             systemImageName: "music.note.list"
         )
-        AppShortcut(
-            intent: LCPlayDeezerIntent(),
-            phrases: [
-                "Play \(\.$query) on Deezer with \(.applicationName)",
-                "\(.applicationName) play \(\.$query) on Deezer"
-            ],
-            shortTitle: "Deezer",
-            systemImageName: "waveform"
-        )
-        AppShortcut(
-            intent: LCPlaySomethingDeezerIntent(),
-            phrases: [
-                "Play something on Deezer with \(.applicationName)",
-                "\(.applicationName) play something on Deezer"
-            ],
-            shortTitle: "Deezer Something",
-            systemImageName: "waveform"
-        )
     }
 }
