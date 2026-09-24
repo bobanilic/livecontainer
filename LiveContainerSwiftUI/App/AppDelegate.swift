@@ -161,6 +161,32 @@ final class SiriMediaIntentHandler: NSObject, INPlayMediaIntentHandling {
         siriDiag("installedGuests [\(guests)]")
     }
 
+    private static func universalDescriptor(
+        provider: LCUniversalMediaProvider,
+        search: INMediaSearch?
+    ) -> [String: Any] {
+        [
+            "provider": provider.rawValue,
+            "query": LCUniversalMediaRouter.query(from: search) ?? ""
+        ]
+    }
+
+    private static func universalDescriptor(from intent: INPlayMediaIntent) -> [String: Any]? {
+        let prefix = "livecontainer.universal:"
+        for item in intent.mediaItems ?? [] {
+            guard let identifier = item.identifier, identifier.hasPrefix(prefix) else { continue }
+            let encoded = String(identifier.dropFirst(prefix.count))
+            guard
+                let data = Data(base64Encoded: encoded),
+                let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else {
+                continue
+            }
+            return object
+        }
+        return nil
+    }
+
     /// SiriKit requires media-item resolution for INPlayMediaIntent.
     /// Without this method Siri accepts the permission/capability registration,
     /// but the request can terminate with a generic "there's a problem" response
@@ -169,7 +195,8 @@ final class SiriMediaIntentHandler: NSObject, INPlayMediaIntentHandling {
         for intent: INPlayMediaIntent,
         with completion: @escaping ([INPlayMediaMediaItemResolutionResult]) -> Void
     ) {
-        guard Self.spotifyGuest() != nil else {
+        let selectedProvider = LCUniversalMediaRouter.selectedProvider
+        if selectedProvider == .spotify, Self.spotifyGuest() == nil {
             NSLog("[LCSiri] resolveMediaItems: Spotify guest not found")
             completion([
                 INPlayMediaMediaItemResolutionResult.unsupported(forReason: .serviceUnavailable)
@@ -178,6 +205,7 @@ final class SiriMediaIntentHandler: NSObject, INPlayMediaIntentHandling {
         }
 
         Self.providerProbe(intent, stage: "resolve")
+        Self.siriDiag("resolve selectedProvider=\(selectedProvider.displayName)")
         let search = intent.mediaSearch
         var titleParts = [
             search?.mediaName,
@@ -195,7 +223,7 @@ final class SiriMediaIntentHandler: NSObject, INPlayMediaIntentHandling {
         titleParts.append(contentsOf: search?.activityNames ?? [])
         let requestedTitle = titleParts.joined(separator: " ")
 
-        let title = requestedTitle.isEmpty ? "Spotify" : requestedTitle
+        let title = requestedTitle.isEmpty ? selectedProvider.displayName : requestedTitle
         let mediaType: INMediaItemType = {
             guard let type = search?.mediaType, type != .unknown else {
                 return .music
@@ -203,17 +231,31 @@ final class SiriMediaIntentHandler: NSObject, INPlayMediaIntentHandling {
             return type
         }()
 
-        let descriptor = Self.spotifySearchDescriptor(search)
-        let identifier: String = {
-            guard
-                let descriptor,
-                let data = try? JSONSerialization.data(withJSONObject: descriptor),
-                !data.isEmpty
-            else {
-                return "livecontainer.spotify"
-            }
-            return "livecontainer.spotify.query:" + data.base64EncodedString()
-        }()
+        let identifier: String
+        let descriptorDescription: String
+
+        if selectedProvider == .spotify {
+            let descriptor = Self.spotifySearchDescriptor(search)
+            descriptorDescription = descriptor.map { String(describing: $0) } ?? "nil"
+            identifier = {
+                guard
+                    let descriptor,
+                    let data = try? JSONSerialization.data(withJSONObject: descriptor),
+                    !data.isEmpty
+                else {
+                    return "livecontainer.spotify"
+                }
+                return "livecontainer.spotify.query:" + data.base64EncodedString()
+            }()
+        } else {
+            let descriptor = Self.universalDescriptor(
+                provider: selectedProvider,
+                search: search
+            )
+            descriptorDescription = String(describing: descriptor)
+            let data = try? JSONSerialization.data(withJSONObject: descriptor)
+            identifier = "livecontainer.universal:" + (data?.base64EncodedString() ?? "")
+        }
 
         let item = INMediaItem(
             identifier: identifier,
@@ -223,13 +265,49 @@ final class SiriMediaIntentHandler: NSObject, INPlayMediaIntentHandling {
         )
 
         Self.siriDiag(
-            "resolve title=\(title) descriptor=\(descriptor.map { String(describing: $0) } ?? "nil") identifierPrefix=\(identifier.prefix(48))"
+            "resolve title=\(title) descriptor=\(descriptorDescription) identifierPrefix=\(identifier.prefix(48))"
         )
         completion(INPlayMediaMediaItemResolutionResult.successes(with: [item]))
     }
 
     func handle(intent: INPlayMediaIntent, completion: @escaping (INPlayMediaIntentResponse) -> Void) {
         Self.providerProbe(intent, stage: "handle")
+
+        let preserved = Self.universalDescriptor(from: intent)
+        let provider: LCUniversalMediaProvider = {
+            if
+                let raw = preserved?["provider"] as? String,
+                let decoded = LCUniversalMediaProvider(rawValue: raw)
+            {
+                return decoded
+            }
+            return LCUniversalMediaRouter.selectedProvider
+        }()
+
+        if provider != .spotify {
+            let preservedQuery = (preserved?["query"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let query = (preservedQuery?.isEmpty == false)
+                ? preservedQuery
+                : LCUniversalMediaRouter.query(from: intent.mediaSearch)
+
+            Self.siriDiag(
+                "handle universal provider=\(provider.displayName) query=\(query ?? "<generic>")"
+            )
+            completion(INPlayMediaIntentResponse(code: .success, userActivity: nil))
+
+            Task { @MainActor in
+                do {
+                    try await LCUniversalMediaRouter.route(provider: provider, query: query)
+                } catch {
+                    Self.siriDiag(
+                        "universal guest launch failed provider=\(provider.displayName) error=\(String(describing: error))"
+                    )
+                }
+            }
+            return
+        }
+
         guard let spotify = Self.spotifyGuest() else {
             NSLog("[LCSiri] Spotify guest not found")
             completion(INPlayMediaIntentResponse(code: .failure, userActivity: nil))
@@ -374,6 +452,64 @@ enum LCUniversalMediaProvider: String {
 @available(iOS 16.0, *)
 @MainActor
 enum LCUniversalMediaRouter {
+    static let selectedProviderKey = "LCUniversalSelectedMediaProvider"
+
+    static var selectedProvider: LCUniversalMediaProvider {
+        get {
+            guard
+                let raw = LCUtils.appGroupUserDefault.string(forKey: selectedProviderKey),
+                let provider = LCUniversalMediaProvider(rawValue: raw)
+            else {
+                return .spotify
+            }
+            return provider
+        }
+        set {
+            LCUtils.appGroupUserDefault.set(newValue.rawValue, forKey: selectedProviderKey)
+            diag("selected provider=\(newValue.displayName)")
+        }
+    }
+
+    static func select(provider: LCUniversalMediaProvider) {
+        selectedProvider = provider
+    }
+
+    static func query(from search: INMediaSearch?) -> String? {
+        guard let search else { return nil }
+
+        func clean(_ value: String?) -> String? {
+            guard let value else { return nil }
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+
+        if let media = clean(search.mediaName) {
+            if let artist = clean(search.artistName) {
+                return "\(media) \(artist)"
+            }
+            return media
+        }
+        if let album = clean(search.albumName) {
+            if let artist = clean(search.artistName) {
+                return "\(album) \(artist)"
+            }
+            return album
+        }
+        if let artist = clean(search.artistName) {
+            return artist
+        }
+        if let genre = search.genreNames?.first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
+            return genre
+        }
+        if let mood = search.moodNames?.first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
+            return mood
+        }
+        if let activity = search.activityNames?.first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
+            return activity
+        }
+        return nil
+    }
+
     private static let genreWords: Set<String> = [
         "jazz", "rock", "pop", "house", "techno", "trance", "classical",
         "hip hop", "hip-hop", "rap", "metal", "blues", "country", "reggae",
@@ -739,6 +875,50 @@ struct LCPlaySomethingDeezerIntent: AppIntent {
     }
 }
 
+@available(iOS 16.0, *)
+struct LCSelectSpotifyIntent: AppIntent {
+    static var title: LocalizedStringResource = "Use Spotify in LiveContainer"
+
+    @MainActor
+    func perform() async throws -> some IntentResult {
+        LCUniversalMediaRouter.select(provider: .spotify)
+        return .result()
+    }
+}
+
+@available(iOS 16.0, *)
+struct LCSelectYouTubeIntent: AppIntent {
+    static var title: LocalizedStringResource = "Use YouTube in LiveContainer"
+
+    @MainActor
+    func perform() async throws -> some IntentResult {
+        LCUniversalMediaRouter.select(provider: .youtube)
+        return .result()
+    }
+}
+
+@available(iOS 16.0, *)
+struct LCSelectYouTubeMusicIntent: AppIntent {
+    static var title: LocalizedStringResource = "Use YouTube Music in LiveContainer"
+
+    @MainActor
+    func perform() async throws -> some IntentResult {
+        LCUniversalMediaRouter.select(provider: .youtubeMusic)
+        return .result()
+    }
+}
+
+@available(iOS 16.0, *)
+struct LCSelectDeezerIntent: AppIntent {
+    static var title: LocalizedStringResource = "Use Deezer in LiveContainer"
+
+    @MainActor
+    func perform() async throws -> some IntentResult {
+        LCUniversalMediaRouter.select(provider: .deezer)
+        return .result()
+    }
+}
+
 @available(iOS 17.0, *)
 public struct LCUniversalMediaIntentsPackage: AppIntentsPackage {
     public init() {}
@@ -747,6 +927,42 @@ public struct LCUniversalMediaIntentsPackage: AppIntentsPackage {
 @available(iOS 16.0, *)
 struct LCUniversalMediaShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
+        AppShortcut(
+            intent: LCSelectSpotifyIntent(),
+            phrases: [
+                "Use Spotify in \(.applicationName)",
+                "Switch \(.applicationName) to Spotify"
+            ],
+            shortTitle: "Use Spotify",
+            systemImageName: "music.note"
+        )
+        AppShortcut(
+            intent: LCSelectYouTubeIntent(),
+            phrases: [
+                "Use YouTube in \(.applicationName)",
+                "Switch \(.applicationName) to YouTube"
+            ],
+            shortTitle: "Use YouTube",
+            systemImageName: "play.rectangle"
+        )
+        AppShortcut(
+            intent: LCSelectYouTubeMusicIntent(),
+            phrases: [
+                "Use YouTube Music in \(.applicationName)",
+                "Switch \(.applicationName) to YouTube Music"
+            ],
+            shortTitle: "Use YouTube Music",
+            systemImageName: "music.note"
+        )
+        AppShortcut(
+            intent: LCSelectDeezerIntent(),
+            phrases: [
+                "Use Deezer in \(.applicationName)",
+                "Switch \(.applicationName) to Deezer"
+            ],
+            shortTitle: "Use Deezer",
+            systemImageName: "waveform"
+        )
         AppShortcut(
             intent: LCPlaySpotifyIntent(),
             phrases: [
