@@ -740,6 +740,11 @@ struct LCPlaySomethingDeezerIntent: AppIntent {
 }
 
 @available(iOS 16.0, *)
+public struct LCUniversalMediaIntentsPackage: AppIntentsPackage {
+    public init() {}
+}
+
+@available(iOS 16.0, *)
 struct LCUniversalMediaShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         AppShortcut(
