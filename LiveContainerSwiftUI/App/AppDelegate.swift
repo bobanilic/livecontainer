@@ -739,7 +739,7 @@ struct LCPlaySomethingDeezerIntent: AppIntent {
     }
 }
 
-@available(iOS 16.0, *)
+@available(iOS 17.0, *)
 public struct LCUniversalMediaIntentsPackage: AppIntentsPackage {
     public init() {}
 }
