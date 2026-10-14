@@ -23,6 +23,11 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Quick guest launch preparation checks
+        run: |
+          clang -fobjc-arc -framework Foundation tests/GuestLaunchPreparationChecks.m -o /tmp/lc-guest-launch-checks
+          /tmp/lc-guest-launch-checks
+
       - name: Archive
         run: |
           set -o pipefail
@@ -50,3 +55,4 @@ jobs:
           path: |
             LiveContainer.ipa
             LiveContainer+SideStore.ipa
+

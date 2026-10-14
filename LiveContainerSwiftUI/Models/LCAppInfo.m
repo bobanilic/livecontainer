@@ -293,7 +293,14 @@
 
 }
 
-- (void)patchExecAndSignIfNeedWithCompletionHandler:(void(^)(bool success, NSString* errorInfo))completetionHandler progressHandler:(void(^)(NSProgress* progress))progressHandler forceSign:(BOOL)forceSign {
+- (void)patchExecAndSignIfNeedWithCompletionHandler:(void(^)(bool success, NSString* errorInfo))callerCompletion progressHandler:(void(^)(NSProgress* progress))progressHandler forceSign:(BOOL)forceSign {
+    void (^completetionHandler)(bool, NSString*) = ^(bool success, NSString *error) {
+        if (success && self->_info[@"LBoxNeedsPreparation"]) {
+            [self->_info removeObjectForKey:@"LBoxNeedsPreparation"];
+            [self save];
+        }
+        callerCompletion(success, error);
+    };
     [NSUserDefaults.standardUserDefaults setObject:@(YES) forKey:@"SigningInProgress"];
     NSString *appPath = self.bundlePath;
 
@@ -798,3 +805,4 @@
 }
 
 @end
+
