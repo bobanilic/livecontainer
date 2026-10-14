@@ -90,6 +90,9 @@ struct LiveContainerSwiftUIApp : SwiftUI.App {
             NSLog("[LC] error:\(error)")
         }
         
+        if UserDefaults.standard.string(forKey: "LCPendingGuestLaunchURL") != nil {
+            DataManager.shared.model.selectedTab = .apps
+        }
         DataManager.shared.model.apps = tempApps
         DataManager.shared.model.arm32EmuApps = tempArm32EmuApps
         DataManager.shared.model.hiddenApps = tempHiddenApps
@@ -119,3 +122,4 @@ struct LiveContainerSwiftUIApp : SwiftUI.App {
     }
     
 }
+

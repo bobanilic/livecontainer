@@ -397,6 +397,16 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
         .onAppear() {
             if !isViewAppeared {
+                if let pending = UserDefaults.standard.string(forKey: "LCPendingGuestLaunchURL") {
+                    // Consume once before starting asynchronous signing or launching.
+                    UserDefaults.standard.removeObject(forKey: "LCPendingGuestLaunchURL")
+                    UserDefaults.standard.synchronize()
+                    if let link = URL(string: pending), link.host == "livecontainer-launch" {
+                        isViewAppeared = true
+                        handleURL(url: link)
+                        return
+                    }
+                }
                 if let webpageUrlStr = UserDefaults.standard.string(forKey: "webPageToOpen") {
                     Task { await openWebView(urlString: webpageUrlStr) }
                     UserDefaults.standard.set(nil, forKey: "webPageToOpen")
@@ -1256,3 +1266,4 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
 extension View {
     func apply<V: View>(@ViewBuilder _ block: (Self) -> V) -> V { block(self) }
 }
+

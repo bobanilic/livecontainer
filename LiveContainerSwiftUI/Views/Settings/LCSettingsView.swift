@@ -67,6 +67,8 @@ struct LCSettingsView: View {
     @AppStorage("LCWaitForDebugger") var waitForDebugger = false
     @AppStorage("LCSharePrivateDataWithLiveProcess") var sharePrivateDataWithLiveProcess = false
     @AppStorage("BKNoWatchdogs") var disableLiveProcessWatchdog = false
+    @AppStorage("LCUniversalSelectedMediaProvider", store: LCUtils.appGroupUserDefault)
+    var universalMediaProvider: String = LCUniversalMediaProvider.spotify.rawValue
     
     @EnvironmentObject private var sharedModel : SharedModel
     
@@ -258,6 +260,34 @@ struct LCSettingsView: View {
                     }
                 } footer: {
                     Text("lc.settings.dontSignDesc".loc)
+                }
+
+                Section {
+                    Picker("Siri Media Provider", selection: $universalMediaProvider) {
+                        Text("Spotify").tag(LCUniversalMediaProvider.spotify.rawValue)
+                        Text("YouTube").tag(LCUniversalMediaProvider.youtube.rawValue)
+                        Text("YouTube Music").tag(LCUniversalMediaProvider.youtubeMusic.rawValue)
+                        Text("Deezer").tag(LCUniversalMediaProvider.deezer.rawValue)
+                    }
+                    .onChange(of: universalMediaProvider) { raw in
+                        if let provider = LCUniversalMediaProvider(rawValue: raw) {
+                            LCUniversalMediaRouter.select(provider: provider)
+                        }
+                    }
+                } header: {
+                    Text("Siri Media Router")
+                } footer: {
+                    Text("Choose which LiveContainer guest handles normal Siri media requests such as “Play jazz.” Siri removes provider names before LiveContainer receives standard PlayMedia intents.")
+                }
+
+                Section {
+                    NavigationLink {
+                        LCSiriDiagnosticsView()
+                    } label: {
+                        Text("Siri Media Diagnostics")
+                    }
+                } footer: {
+                    Text("Shows the last 250 Siri/Spotify routing events. Tokens are never stored.")
                 }
 
                 Section {
@@ -712,5 +742,49 @@ struct LCSettingsView: View {
                 
             }
         }
+    }
+}
+
+
+struct LCSiriDiagnosticsView: View {
+    @State private var logText = ""
+
+    var body: some View {
+        VStack(spacing: 12) {
+            ScrollView {
+                Text(logText.isEmpty ? "No Siri diagnostics recorded yet." : logText)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding()
+            }
+
+            HStack {
+                Button("Refresh") {
+                    refresh()
+                }
+                Spacer()
+                Button("Copy") {
+                    UIPasteboard.general.string = logText
+                }
+                Spacer()
+                Button("Clear", role: .destructive) {
+                    LCUtils.appGroupUserDefault.removeObject(forKey: "LCSiriDiagnosticLog")
+                    refresh()
+                }
+            }
+            .padding(.horizontal)
+            .padding(.bottom)
+        }
+        .navigationTitle("Siri Diagnostics")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            refresh()
+        }
+    }
+
+    private func refresh() {
+        logText = (LCUtils.appGroupUserDefault.stringArray(forKey: "LCSiriDiagnosticLog") ?? [])
+            .joined(separator: "\n")
     }
 }

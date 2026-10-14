@@ -1,3 +1,4 @@
+#import "LCGuestLaunchPreparation.h"
 #import "LCSharedUtils.h"
 #import "FoundationPrivate.h"
 #import "UIKitPrivate.h"
@@ -198,6 +199,19 @@ NSString* FBSOpenApplicationOptionKeyPayloadURL = @"__PayloadURL";
         NSBundle *appBundle = [self findBundleWithBundleId:launchBundleId isSharedAppOut:&isSharedApp];
         NSDictionary *appInfo = [NSDictionary dictionaryWithContentsOfFile:
             [appBundle.bundlePath stringByAppendingPathComponent:@"LCAppInfo.plist"]];
+        if (![launchBundleId isEqualToString:@"ui"] &&
+            ![launchBundleId isEqualToString:@"builtinSideStore"] &&
+            LCGuestBundleNeedsPreparation(appBundle.bundleURL)) {
+            // Retain the entire request, including media/deep-link parameters.
+            // The UI owns container initialization, executable patching and signing.
+            [lcUserDefaults setObject:url.absoluteString forKey:@"LCPendingGuestLaunchURL"];
+            [lcUserDefaults setObject:@"ui" forKey:@"selected"];
+            [lcUserDefaults removeObjectForKey:@"selectedContainer"];
+            [lcUserDefaults removeObjectForKey:@"launchAppUrlScheme"];
+            // The process will be terminated by the existing relaunch helper.
+            [lcUserDefaults synchronize];
+            return [self launchToGuestAppWithClassicMode:0];
+        }
         NSUInteger classicMode = [appInfo[@"classicMode"] boolValue]
             ? [appInfo[@"LCClassicModeCache"][@"defaultClassicMode"] unsignedIntegerValue]
             : 0;
@@ -433,3 +447,4 @@ NSString* FBSOpenApplicationOptionKeyPayloadURL = @"__PayloadURL";
     return result;
 }
 @end
+

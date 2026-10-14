@@ -1,3 +1,4 @@
+#import "LCGuestLaunchPreparation.h"
 #import "FoundationPrivate.h"
 #import "LCMachOUtils.h"
 #import "LCSharedUtils.h"
@@ -728,6 +729,19 @@ int LiveContainerMain(int argc, char *argv[]) {
     // in case some weird apps remove the tmp folder
     [NSFileManager.defaultManager createDirectoryAtPath:@(getenv("TMPDIR")) withIntermediateDirectories:YES attributes:nil error:nil];
     
+    if (!isLiveProcess && selectedApp && ![selectedApp isEqualToString:@"ui"] &&
+        ![selectedApp isEqualToString:@"builtinSideStore"]) {
+        bool shared = false;
+        NSBundle *requestedBundle = [LCSharedUtils findBundleWithBundleId:selectedApp isSharedAppOut:&shared];
+        if (LCGuestBundleNeedsPreparation(requestedBundle.bundleURL)) {
+            NSString *request = LCGuestPreparationURL(lcAppUrlScheme, selectedApp, selectedContainer, launchUrl);
+            if (request) [lcUserDefaults setObject:request forKey:@"LCPendingGuestLaunchURL"];
+            [lcUserDefaults removeObjectForKey:@"launchAppUrlScheme"];
+            selectedApp = @"ui";
+            selectedContainer = nil;
+            launchUrl = nil;
+        }
+    }
     if([selectedApp isEqualToString:@"ui"]) {
         selectedApp = nil;
         [lcUserDefaults removeObjectForKey:@"selected"];
@@ -882,3 +896,4 @@ int callAppMain(int argc, char *argv[], char *envp[]) {
     __attribute__((musttail)) return appMain(argc, argv, envp);
 }
 #endif
+
