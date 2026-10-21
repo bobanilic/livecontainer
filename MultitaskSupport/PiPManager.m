@@ -20,6 +20,30 @@ API_AVAILABLE(ios(16.0))
 
 @implementation PiPManager
 API_AVAILABLE(ios(16.0))
+
+// Diagnostic-only instrumentation: no additional background capabilities are requested.
+- (void)recordBridgePiPEvent:(NSString *)event detail:(NSString *)detail {
+    NSMutableDictionary *entry = [NSMutableDictionary dictionaryWithDictionary:@{
+        @"event": event ?: @"unknown",
+        @"time": @([[NSDate date] timeIntervalSince1970]),
+        @"active": @(self.pipController.isPictureInPictureActive),
+        @"possible": @(self.pipController.isPictureInPicturePossible),
+        @"supported": @([AVPictureInPictureController isPictureInPictureSupported]),
+        @"appState": @(UIApplication.sharedApplication.applicationState)
+    }];
+    if (detail.length > 0) { entry[@"detail"] = detail; }
+    NSArray *existing = [NSUserDefaults.lcSharedDefaults arrayForKey:@"LCPiPDiagnosticHistory"];
+    NSMutableArray *history = existing ? [existing mutableCopy] : [NSMutableArray array];
+    [history addObject:entry];
+    if (history.count > 40) {
+        [history removeObjectsInRange:NSMakeRange(0, history.count - 40)];
+    }
+    [NSUserDefaults.lcSharedDefaults setObject:history forKey:@"LCPiPDiagnosticHistory"];
+    NSLog(@"[LCPiPDiagnostics] %@ active=%d possible=%d detail=%@",
+          event, self.pipController.isPictureInPictureActive,
+          self.pipController.isPictureInPicturePossible, detail ?: @"");
+}
+
 static PiPManager* sharedInstance = nil;
 
 + (instancetype)shared {
@@ -45,13 +69,31 @@ static PiPManager* sharedInstance = nil;
 }
 
 - (instancetype)init {
-    NSError* error = nil;
+    self = [super init];
+    if (!self) { return nil; }
+    NSError *error = nil;
     [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayback error:&error];
+    if (error) { [self recordBridgePiPEvent:@"audio-category-error" detail:error.localizedDescription]; }
+    error = nil;
     [[AVAudioSession sharedInstance] setActive:YES withOptions:1 error:&error];
+    if (error) { [self recordBridgePiPEvent:@"audio-session-error" detail:error.localizedDescription]; }
+
+    __weak typeof(self) weakSelf = self;
+    [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidEnterBackgroundNotification
+                                                      object:nil queue:[NSOperationQueue mainQueue]
+                                                  usingBlock:^(__unused NSNotification *notification) {
+        [weakSelf recordBridgePiPEvent:@"host-entered-background" detail:nil];
+    }];
+    [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationWillEnterForegroundNotification
+                                                      object:nil queue:[NSOperationQueue mainQueue]
+                                                  usingBlock:^(__unused NSNotification *notification) {
+        [weakSelf recordBridgePiPEvent:@"host-will-enter-foreground" detail:nil];
+    }];
     return self;
 }
 
 - (void)startPiPWithVC:(AppSceneViewController*)vc {
+    [self recordBridgePiPEvent:@"start-requested" detail:nil];
     [self.pipController stopPictureInPicture];
     if(self.displayingVC) {
         [self.displayingDecoratedVC unminimizeWindowPiP];
@@ -74,8 +116,10 @@ static PiPManager* sharedInstance = nil;
         self.pipController = [[AVPictureInPictureController alloc] initWithContentSource:contentSource];
         self.pipController.canStartPictureInPictureAutomaticallyFromInline = YES;
         self.pipController.delegate = self;
+        [self recordBridgePiPEvent:@"controller-created" detail:nil];
         [self.pipController setValue:@1 forKey:@"controlsStyle"];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [self recordBridgePiPEvent:@"start-invoked" detail:nil];
             [self.pipController startPictureInPicture];
         });
     });
@@ -83,11 +127,13 @@ static PiPManager* sharedInstance = nil;
 }
 
 - (void)stopPiP {
+    [self recordBridgePiPEvent:@"stop-requested" detail:nil];
     [self.pipController stopPictureInPicture];
 }
 
 // PIP delegate
 - (void)pictureInPictureControllerWillStartPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
+    [self recordBridgePiPEvent:@"will-start" detail:nil];
     [self.displayingDecoratedVC minimizeWindowPiP];
     if(self.displayingVC.usesHostingControllerAPI) {
         self.pipVideoCallContentView.frame = CGRectMake(0, 0, self.displayingVC.view.bounds.size.width, self.displayingVC.view.bounds.size.height);
@@ -109,15 +155,17 @@ static PiPManager* sharedInstance = nil;
 
 
 - (void)pictureInPictureControllerDidStartPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
-    
+    [self recordBridgePiPEvent:@"did-start" detail:nil];
 }
 
 - (void)pictureInPictureControllerWillStopPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
+    [self recordBridgePiPEvent:@"will-stop" detail:nil];
     self.displayingVC.shouldIgnoreSceneUpdates = NO;
     [self.displayingDecoratedVC unminimizeWindowPiP];
 }
 
 - (void)pictureInPictureControllerDidStopPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
+    [self recordBridgePiPEvent:@"did-stop" detail:nil];
     [self.displayingVC.view insertSubview:self.displayingVC.contentView atIndex:0];
     [self.displayingVC setBackgroundNotificationEnabled:true];
     // resize if needed (eg orientation differs)
@@ -132,6 +180,7 @@ static PiPManager* sharedInstance = nil;
 }
 
 - (void)pictureInPictureController:(AVPictureInPictureController *)pictureInPictureController failedToStartPictureInPictureWithError:(NSError *)error {
+    [self recordBridgePiPEvent:@"failed-to-start" detail:error.localizedDescription];
     NSLog(@"%@", error.description);
 }
 

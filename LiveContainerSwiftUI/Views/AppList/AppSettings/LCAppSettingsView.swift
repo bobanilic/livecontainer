@@ -37,6 +37,7 @@ struct LCAppSettingsView: View {
     @State private var errorShow = false
     @State private var errorInfo = ""
     @State private var selectUnusedContainerSheetShow = false
+    @State private var pipDebugStatus = "No PiP events captured"
     
     @EnvironmentObject private var sharedModel : SharedModel
     
@@ -45,6 +46,19 @@ struct LCAppSettingsView: View {
         self._model = ObservedObject(wrappedValue: model)
     }
     
+    private func refreshPiPDiagnostics() {
+        let history = LCUtils.appGroupUserDefault.array(forKey: "LCPiPDiagnosticHistory") as? [[String: Any]] ?? []
+        guard let latest = history.last else {
+            pipDebugStatus = "No PiP events captured yet"
+            return
+        }
+        let name = latest["event"] as? String ?? "unknown"
+        let active = (latest["active"] as? Bool) == true ? "yes" : "no"
+        let possible = (latest["possible"] as? Bool) == true ? "yes" : "no"
+        let detail = latest["detail"] as? String ?? ""
+        pipDebugStatus = "\(name) | active: \(active) | possible: \(possible)" + (detail.isEmpty ? "" : "\n" + detail)
+    }
+
     var body: some View {
         Form {
             Section {
@@ -241,6 +255,23 @@ struct LCAppSettingsView: View {
             }
             
             if #available(iOS 16.0, *) {
+                Section("PiP background diagnostics") {
+                    Text(pipDebugStatus)
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                    Button("Refresh PiP status") {
+                        refreshPiPDiagnostics()
+                    }
+                    Button("Copy PiP diagnostics") {
+                        let events = LCUtils.appGroupUserDefault.array(forKey: "LCPiPDiagnosticHistory") ?? []
+                        if let data = try? JSONSerialization.data(withJSONObject: events, options: [.prettyPrinted, .sortedKeys]) {
+                            UIPasteboard.general.string = String(decoding: data, as: UTF8.self)
+                        }
+                    }
+                    Text("Records when iOS starts or stops LiveContainer's system Picture-in-Picture session. This does not enable unrestricted background execution.")
+                        .font(.footnote)
+                }
+                .onAppear { refreshPiPDiagnostics() }
                 Section {
                     Picker(selection: $model.uiIsMultitaskModeSpecificed) {
                         Text("lc.common.default".loc).tag(MultitaskSpecified.default)
