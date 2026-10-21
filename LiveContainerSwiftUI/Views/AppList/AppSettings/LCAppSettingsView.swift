@@ -55,8 +55,9 @@ struct LCAppSettingsView: View {
         let name = latest["event"] as? String ?? "unknown"
         let active = (latest["active"] as? Bool) == true ? "yes" : "no"
         let possible = (latest["possible"] as? Bool) == true ? "yes" : "no"
+        let suspended = (latest["suspended"] as? Bool) == true ? "yes" : "no"
         let detail = latest["detail"] as? String ?? ""
-        pipDebugStatus = "\(name) | active: \(active) | possible: \(possible)" + (detail.isEmpty ? "" : "\n" + detail)
+        pipDebugStatus = "\(name) | active: \(active) | possible: \(possible) | suspended: \(suspended)" + (detail.isEmpty ? "" : "\n" + detail)
     }
 
     var body: some View {

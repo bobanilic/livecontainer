@@ -28,6 +28,7 @@ API_AVAILABLE(ios(16.0))
         @"time": @([[NSDate date] timeIntervalSince1970]),
         @"active": @(self.pipController.isPictureInPictureActive),
         @"possible": @(self.pipController.isPictureInPicturePossible),
+        @"suspended": @(self.pipController.isPictureInPictureSuspended),
         @"supported": @([AVPictureInPictureController isPictureInPictureSupported]),
         @"appState": @(UIApplication.sharedApplication.applicationState)
     }];
